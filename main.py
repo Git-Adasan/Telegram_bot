@@ -2707,6 +2707,16 @@ async def main():
         BotCommand(command="banlist",      description="📋 Список банов"),
     ], scope=BotCommandScopeChat(chat_id=ADMIN_ID))
 
+    # Мини-веб-сервер: Render (Web Service) требует открытый порт
+    from aiohttp import web
+    async def _health(request):
+        return web.Response(text="OK")
+    _app = web.Application()
+    _app.router.add_get("/", _health)
+    _runner = web.AppRunner(_app)
+    await _runner.setup()
+    await web.TCPSite(_runner, "0.0.0.0", int(os.getenv("PORT", "10000"))).start()
+
     logger.info("✅ Бот запущен!")
     await dp.start_polling(bot)
 
