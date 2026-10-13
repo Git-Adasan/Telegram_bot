@@ -799,6 +799,138 @@ def find_subject(query):
     return None
 
 
+# =========================
+# УМНЫЙ ПОИСК КНИГ (опечатки + латиница)
+# =========================
+from functools import lru_cache
+
+_LAT_MULTI = [
+    ("shch", "щ"), ("sch", "ш"), ("sh", "ш"), ("ch", "ч"), ("zh", "ж"),
+    ("kh", "х"), ("ts", "ц"), ("ya", "я"), ("yu", "ю"), ("yo", "е"),
+    ("ye", "е"), ("ph", "ф"), ("th", "т"), ("ck", "к"),
+]
+_LAT_SINGLE = {
+    "a": "а", "b": "б", "c": "к", "d": "д", "e": "е", "f": "ф", "g": "г",
+    "h": "х", "i": "и", "j": "ж", "k": "к", "l": "л", "m": "м", "n": "н",
+    "o": "о", "p": "п", "q": "к", "r": "р", "s": "с", "t": "т", "u": "у",
+    "v": "в", "w": "в", "x": "кс", "y": "и", "z": "с",
+}
+# «Звуковое» упрощение: похожие по звучанию буквы считаются одной
+_PHON_MAP = str.maketrans({
+    "ё": "и", "е": "и", "э": "и", "ы": "и", "і": "и", "й": "и",
+    "я": "а", "о": "а", "ә": "а", "ө": "а",
+    "ю": "у", "ү": "у", "ұ": "у",
+    "қ": "к", "ғ": "г", "ң": "н", "һ": "х",
+    "щ": "ш", "ч": "ш", "ж": "ш", "ц": "с",
+    "б": "п", "в": "ф", "г": "к", "д": "т", "з": "с",
+    "ъ": "", "ь": "",
+})
+
+
+@lru_cache(maxsize=50000)
+def _phon_key(word):
+    """Слово -> 'звуковой ключ'. Латиница и кириллица приводятся к одному виду."""
+    w = word.lower()
+    for a, b in _LAT_MULTI:
+        w = w.replace(a, b)
+    w = "".join(_LAT_SINGLE.get(ch, ch) for ch in w)
+    w = w.translate(_PHON_MAP)
+    return re.sub(r"(.)\1+", r"\1", w)  # двойные буквы -> одна
+
+
+def _tokens(text):
+    return [w for w in re.findall(r"[^\W\d_]+", text.lower()) if len(w) >= 3]
+
+
+def _edit_sim(a, b):
+    """Похожесть слов 0..1 (расстояние Дамерау-Левенштейна, перестановка = 1 ошибка)."""
+    la, lb = len(a), len(b)
+    if not la or not lb:
+        return 0.0
+    prev2, prev = None, list(range(lb + 1))
+    for i in range(1, la + 1):
+        cur = [i] + [0] * lb
+        for j in range(1, lb + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+            if i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
+                cur[j] = min(cur[j], prev2[j - 2] + 1)
+        prev2, prev = prev, cur
+    return 1 - prev[lb] / max(la, lb)
+
+
+def _word_score(qk, bk):
+    if qk == bk:
+        return 1.0
+    if len(qk) >= 4 and bk.startswith(qk):   # человек ввёл начало слова
+        return 0.95
+    if len(qk) >= 4 and qk in bk:
+        return 0.9
+    thr = 0.85 if len(qk) <= 4 else (0.75 if len(qk) <= 6 else 0.7)
+    if abs(len(qk) - len(bk)) > max(len(qk), len(bk)) * (1 - thr):
+        return 0.0
+    s = _edit_sim(qk, bk)
+    return s if s >= thr else 0.0
+
+
+_fuzzy_cache = {"sig": None, "index": {}}
+
+
+def _books_signature():
+    return (id(BOOKS_DB), tuple(
+        (sc, lg, len(bks)) for sc, langs in BOOKS_DB.items() for lg, bks in langs.items()
+    ))
+
+
+def _get_fuzzy_index():
+    """Индекс: звуковой ключ слова -> книги. Пересобирается, когда меняется BOOKS_DB."""
+    sig = _books_signature()
+    if _fuzzy_cache["sig"] != sig:
+        index = {}
+        for sc, langs in BOOKS_DB.items():
+            for lg, bks in langs.items():
+                for idx, bk in enumerate(bks):
+                    text = f'{bk.get("file_name", "")} {bk.get("caption", "")}'
+                    for w in _tokens(text):
+                        k = _phon_key(w)
+                        if k:
+                            index.setdefault(k, set()).add((sc, lg, idx))
+        _fuzzy_cache["index"] = index
+        _fuzzy_cache["sig"] = sig
+    return _fuzzy_cache["index"]
+
+
+def fuzzy_find_books(query, limit=5):
+    """Ищет книги, даже если запрос с опечатками или написан латиницей.
+    Возвращает (всего_найдено, [(sc, lang, idx, book), ...])."""
+    q_keys = [k for k in (_phon_key(w) for w in _tokens(query)) if k]
+    if not q_keys:
+        return 0, []
+    index = _get_fuzzy_index()
+
+    per_book = {}  # (sc, lg, idx) -> [оценки по словам запроса]
+    for qk in q_keys:
+        best = {}
+        for bk_key, books in index.items():
+            s = _word_score(qk, bk_key)
+            if s:
+                for b in books:
+                    if s > best.get(b, 0):
+                        best[b] = s
+        for b, s in best.items():
+            per_book.setdefault(b, []).append(s)
+
+    need = (len(q_keys) + 1) // 2  # минимум половина слов запроса должна совпасть
+    ranked = []
+    for (sc, lg, idx), scores in per_book.items():
+        if len(scores) >= need:
+            ranked.append((len(scores), sum(scores) / len(scores), sc, lg, idx))
+    ranked.sort(key=lambda r: (-r[0], -r[1]))
+    results = [(sc, lg, idx, BOOKS_DB[sc][lg][idx]) for _, _, sc, lg, idx in ranked[:limit]]
+    return len(ranked), results
+
+
+
 
 async def send_subject_menu(chat_id, code):
     name = SUBJECT_NAMES.get(code, "📚 Предмет")
@@ -2498,6 +2630,13 @@ async def search(message: types.Message):
                 if query in fname or query in cap:
                     found_books.append((sc, lang, idx, bk))
 
+    # 3.1 Точного совпадения нет -> умный поиск (опечатки + латиница)
+    is_fuzzy = False
+    total_found = len(found_books)
+    if not found_books:
+        total_found, found_books = await asyncio.to_thread(fuzzy_find_books, text, 5)
+        is_fuzzy = bool(found_books)
+
     if found_books:
         results = found_books[:5]
         keyboard_rows = []
@@ -2507,8 +2646,12 @@ async def search(message: types.Message):
             keyboard_rows.append([InlineKeyboardButton(
                 text=f"{lang_flag} {name}", callback_data=f"bk_{sc}_{lang}_{idx}"
             )])
+        if is_fuzzy:
+            head = "🔍 Дәл сәйкестік жоқ, мүмкін, мынаны іздедіңіз бе?\nТочного совпадения нет, возможно, вы искали:"
+        else:
+            head = f"🔍 Табылды: {total_found} кітап (көрсетілген: {len(results)})"
         await message.answer(
-            f"🔍 Табылды: {len(found_books)} кітап (көрсетілген: {len(results)})\n\n👇 Таңдаңыз:",
+            f"{head}\n\n👇 Таңдаңыз:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
         )
         return
