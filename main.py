@@ -1,4 +1,4 @@
-from aiogram import Bot, Dispatcher, types, BaseMiddleware
+from aiogram import Bot, Dispatcher, types, BaseMiddleware, F
 from aiogram.filters import Command
 from aiogram.types import (
     InlineKeyboardMarkup,
@@ -838,8 +838,17 @@ def _phon_key(word):
     return re.sub(r"(.)\1+", r"\1", w)  # двойные буквы -> одна
 
 
+# Слова-«мусор» в запросах: «дайте книгу», «есть учебник» и т.п.
+_STOP_WORDS = {
+    "книга", "книгу", "книги", "книгa", "учебник", "учебника", "скачать", "дайте", "есть",
+    "пожалуйста", "кто", "нужна", "нужен", "нужно", "ищу", "где", "pdf", "kitap", "кітап",
+    "кітабы", "кітапты", "керек", "бар", "ма", "book", "the", "and", "прошу", "скиньте",
+    "скинь", "кинь", "кинте", "жіберіңіз", "салыңыз", "привет", "здравствуйте", "салем",
+}
+
 def _tokens(text):
-    return [w for w in re.findall(r"[^\W\d_]+", text.lower()) if len(w) >= 3]
+    return [w for w in re.findall(r"[^\W\d_]+", text.lower())
+            if len(w) >= 3 and w not in _STOP_WORDS]
 
 
 def _edit_sim(a, b):
@@ -900,7 +909,7 @@ def _get_fuzzy_index():
     return _fuzzy_cache["index"]
 
 
-def fuzzy_find_books(query, limit=5):
+def fuzzy_find_books(query, limit=5, min_score=0.0):
     """Ищет книги, даже если запрос с опечатками или написан латиницей.
     Возвращает (всего_найдено, [(sc, lang, idx, book), ...])."""
     q_keys = [k for k in (_phon_key(w) for w in _tokens(query)) if k]
@@ -923,7 +932,7 @@ def fuzzy_find_books(query, limit=5):
     need = (len(q_keys) + 1) // 2  # минимум половина слов запроса должна совпасть
     ranked = []
     for (sc, lg, idx), scores in per_book.items():
-        if len(scores) >= need:
+        if len(scores) >= need and sum(scores) / len(scores) >= min_score:
             ranked.append((len(scores), sum(scores) / len(scores), sc, lg, idx))
     ranked.sort(key=lambda r: (-r[0], -r[1]))
     results = [(sc, lg, idx, BOOKS_DB[sc][lg][idx]) for _, _, sc, lg, idx in ranked[:limit]]
@@ -2509,6 +2518,79 @@ async def sbm_reject(callback: types.CallbackQuery):
 # =========================
 # ПОИСК
 # =========================
+# =========================
+# ГРУППЫ / ОБСУЖДЕНИЯ КАНАЛА — авто-ответ книгой
+# =========================
+GROUP_MIN_SCORE = 0.8        # строже, чем в личке: меньше ложных срабатываний в болтовне
+GROUP_MAX_RESULTS = 3        # больше стольких книг — запрос слишком общий, молчим
+GROUP_USER_COOLDOWN = 20     # секунд между ответами одному человеку
+GROUP_CHAT_COOLDOWN = 4      # секунд между ответами в одном чате
+_group_user_last = {}
+_group_chat_last = {}
+
+
+async def _send_book_to_group(message, sc, lang, idx, bk):
+    """Копирует файл из канала в группу. Если не вышло — отправляет карточку со ссылкой."""
+    url = bk.get("url", "")
+    name = bk["file_name"].replace(".pdf", "").replace(".djvu", "").replace("_", " ")
+    m = re.search(r"/(\d+)$", url)
+    if m:
+        try:
+            await bot.copy_message(
+                chat_id=message.chat.id,
+                from_chat_id=f"@{CHANNEL.lstrip('@')}",
+                message_id=int(m.group(1)),
+                reply_to_message_id=message.message_id,
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"copy_message не удался ({url}): {e}")
+    try:
+        await message.reply(
+            f"📖 {name[:60]}\n📌 @library_adasan",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📥 Жүктеу / Скачать", url=url)]
+            ])
+        )
+        return True
+    except Exception as e:
+        logger.warning(f"Ответ в группу не удался: {e}")
+        return False
+
+
+@dp.message(F.chat.type.in_({"group", "supergroup"}), F.text)
+async def group_book_search(message: types.Message):
+    # Никогда не отвечаем ботам и автопересылкам постов канала
+    if not message.from_user or message.from_user.is_bot or message.is_automatic_forward:
+        return
+    text = (message.text or "").strip()
+    if len(text) < 4 or len(text) > 100 or text.startswith("/"):
+        return
+
+    now = time.time()
+    uid, cid = message.from_user.id, message.chat.id
+    if now - _group_user_last.get(uid, 0) < GROUP_USER_COOLDOWN:
+        return
+    if now - _group_chat_last.get(cid, 0) < GROUP_CHAT_COOLDOWN:
+        return
+
+    total, found = await asyncio.to_thread(fuzzy_find_books, text, GROUP_MAX_RESULTS + 1, GROUP_MIN_SCORE)
+    # Ничего не нашли или запрос слишком общий («анатомия») — молчим, не мешаем чату
+    if not found or total > GROUP_MAX_RESULTS:
+        return
+
+    _group_user_last[uid] = now
+    _group_chat_last[cid] = now
+    for sc, lang, idx, bk in found:
+        if await _send_book_to_group(message, sc, lang, idx, bk):
+            try:
+                nm = bk["file_name"].replace(".pdf", "").replace(".djvu", "").replace("_", " ")[:50]
+                record_book_open(bk["url"], nm, sc, lang)
+                add_book_history(uid, sc, lang, idx, nm, bk["url"])
+            except Exception:
+                pass
+
+
 @dp.message(lambda m: m.photo)
 async def get_file_id(message: types.Message):
     file_id = message.photo[-1].file_id
