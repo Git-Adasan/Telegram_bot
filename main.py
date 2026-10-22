@@ -1540,9 +1540,26 @@ async def bookopen_handler(callback: types.CallbackQuery):
         f"📌 @library_adasan"
     )
     keyboard = book_card_keyboard(subject_code, lang, idx, book["url"])
-    photo_path = os.path.join(BASE_DIR, SUBJECT_PHOTOS.get(subject_code, "adasan.jpg"))
-    await bot.send_photo(chat_id=callback.message.chat.id,
-                         photo=FSInputFile(photo_path), caption=caption, reply_markup=keyboard)
+    sent = False
+    cover_id = book.get("photo_message_id")
+    if cover_id:
+        # Обложка берётся из канала (ничего не хранится в архиве бота)
+        try:
+            await bot.copy_message(
+                chat_id=callback.message.chat.id,
+                from_chat_id=f"@{CHANNEL.lstrip('@')}",
+                message_id=int(cover_id),
+                caption=caption,
+                reply_markup=keyboard,
+            )
+            sent = True
+        except Exception as e:
+            logger.warning(f"Обложка не скопировалась (пост {cover_id}): {e}")
+    if not sent:
+        # Нет обложки (методичка, конспект, силабус) — фото предмета из папки бота
+        photo_path = os.path.join(BASE_DIR, SUBJECT_PHOTOS.get(subject_code, "adasan.jpg"))
+        await bot.send_photo(chat_id=callback.message.chat.id,
+                             photo=FSInputFile(photo_path), caption=caption, reply_markup=keyboard)
     # Сохраняем в историю
     book_name_short = name[:50]
     add_book_history(callback.from_user.id, subject_code, lang, idx, book_name_short, book["url"])
@@ -2094,7 +2111,7 @@ async def update_books_command(message: types.Message):
 
     try:
         from telethon import TelegramClient
-        from telethon.tl.types import MessageMediaDocument
+        from telethon.tl.types import MessageMediaDocument, MessageMediaPhoto
         import json as _json2
 
         HASHTAG_MAP = {
@@ -2153,12 +2170,14 @@ async def update_books_command(message: types.Message):
                     return attr.file_name
             return "unknown"
 
-        result = {"new_db": {}, "total": 0, "error": None}
+        result = {"new_db": {}, "total": 0, "covers": 0, "error": None}
 
         async def collect():
             try:
                 new_db = {}
                 total = 0
+                timeline = []       # (id, это_фото, дата) — все посты канала
+                book_entries = []   # (запись_книги, id_поста, дата) — чтобы потом найти обложки
                 session_path = os.path.join(BASE_DIR, "update_session")
                 async with TelegramClient(
                     session_path,
@@ -2168,6 +2187,7 @@ async def update_books_command(message: types.Message):
                     system_lang_code="ru-RU",
                 ) as client:
                     async for msg in client.iter_messages(CHANNEL, limit=5000):
+                        timeline.append((msg.id, isinstance(msg.media, MessageMediaPhoto), msg.date))
                         if not (msg.media and isinstance(msg.media, MessageMediaDocument)):
                             continue
                         doc = msg.media.document
@@ -2184,13 +2204,27 @@ async def update_books_command(message: types.Message):
                         lang = detect_lang(fname + " " + caption)
                         if subj not in new_db:
                             new_db[subj] = {"rus": [], "kaz": [], "eng": []}
-                        new_db[subj][lang].append({
+                        entry = {
                             "message_id": msg.id,
                             "file_name":  fname,
                             "caption":    caption[:300],
                             "url":        f"https://t.me/library_adasan/{msg.id}",
-                        })
+                        }
+                        new_db[subj][lang].append(entry)
+                        book_entries.append((entry, msg.id, msg.date))
                         total += 1
+
+                # Обложка = фото-пост, который стоит ПРЯМО перед файлом (не позже 10 минут).
+                # У методичек, конспектов и силабусов фото нет — поле photo_message_id не создаётся.
+                timeline.sort(key=lambda t: t[0])
+                prev_of = {timeline[i][0]: timeline[i - 1] for i in range(1, len(timeline))}
+                covers = 0
+                for entry, mid, mdate in book_entries:
+                    p = prev_of.get(mid)
+                    if p and p[1] and abs((mdate - p[2]).total_seconds()) <= 600:
+                        entry["photo_message_id"] = p[0]
+                        covers += 1
+                result["covers"] = covers
                 result["new_db"] = new_db
                 result["total"]  = total
             except Exception as e:
@@ -2232,7 +2266,8 @@ async def update_books_command(message: types.Message):
 
         await message.answer(
             f"✅ Жаңартылды!\n\n"
-            f"📖 Барлығы: {total} кітап\n\n"
+            f"📖 Барлығы: {total} кітап\n"
+            f"🖼 Мұқабасы бар / С обложкой: {result['covers']}\n\n"
             f"{stats_text}"
         )
 
@@ -2582,6 +2617,17 @@ async def _send_book_to_group(message, sc, lang, idx, bk):
     url = bk.get("url", "")
     name = bk["file_name"].replace(".pdf", "").replace(".djvu", "").replace("_", " ")
     m = re.search(r"/(\d+)$", url)
+    cover_id = bk.get("photo_message_id")
+    if m and cover_id:
+        try:
+            await bot.copy_message(
+                chat_id=message.chat.id,
+                from_chat_id=f"@{CHANNEL.lstrip('@')}",
+                message_id=int(cover_id),
+                reply_to_message_id=message.message_id,
+            )
+        except Exception as e:
+            logger.warning(f"Обложка в группу не скопировалась ({cover_id}): {e}")
     if m:
         try:
             await bot.copy_message(
