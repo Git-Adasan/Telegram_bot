@@ -543,6 +543,270 @@ class BanAndFloodMiddleware(BaseMiddleware):
 dp.message.middleware(BanAndFloodMiddleware())
 dp.callback_query.middleware(BanAndFloodMiddleware())
 
+# >>> ADASAN_EXTRAS_BEGIN
+# =====================================================================
+# МОДЕРАЦИЯ: мат и оскорбления (русский / казахский / английский)
+# =====================================================================
+import html as _html_x
+
+_CYR = re.compile(r"[а-яёәіңғүұқөһ]")
+_KZ_TO_BASE = str.maketrans("қңұүіөәғһ", "кнууиоагх")
+_LAT_LOOK = str.maketrans("aeopcxyk", "аеорсхук")   # латиница, похожая на кириллицу
+_PREF = r"(?:вы|за|на|по|до|об|от|съ|раз|рас|под|пере|при|недо|не|про|пре|из|ис|с|у|о|а|ни)?"
+
+# Слова проверяются ЦЕЛИКОМ (с началом слова), а не как кусок текста.
+# Поэтому «бляшка», «ребёнок», «хлеба», «витамин», «педикулёз» НЕ срабатывают.
+_HARD_RU_KZ = [re.compile(p) for p in (
+    rf"^{_PREF}ху[йеяию]",                       # хуй, нахуй, похуй, хуёвый
+    r"пизд",
+    r"бляд|блят|^бля$",
+    rf"^{_PREF}еб(?:ан|ал|ат|ну|уч|ло|ис|ен|ок$)",  # ебать, ебанутый, уебок...
+    r"^д[ао]лб[ао]еб",                           # долбоёб, далбаёб
+    r"^мудак|^мудил|^мудозв",
+    r"^пидор|^пидар|^пидр|^педераст",
+    r"^залуп|^шлюх|^ублюд|^гандон|^гондон",
+    r"^мразь$|^мразот",
+    r"^сук[аиуе]$|^сукой$|^сучк|^сучар",
+    r"^чмо$|^чмошн|^тварь$|^тварин",
+    # казахский
+    r"^кот(?:ак|ек)\w{0,4}$|^амын(?:ды|а|нан|да)?$|^сиктир|^каншы[кг]|^жезокше",
+)]
+_HARD_EN = [re.compile(p) for p in (
+    r"^\w*f+u+c+k+\w*$", r"^(fack|facking|fuk|fuking|fcuk|fcking|fck|fvck)$",
+    r"^motherf\w+$", r"^cunts?$", r"^bitch(es|y)?$", r"^assholes?$", r"^dickheads?$",
+    r"^(whore|slut)s?$", r"^fagg?ots?$", r"^nigg(er|a)s?$",
+    # русский мат латиницей
+    r"^(blyat\w*|blyad\w*|blya|pizd\w*|nahuy|nahui|nahuj|huy|xuy|huj|"
+    r"ebat\w*|ebal\w*|ebanat\w*|pidor\w*|pidar\w*|mudak\w*|gandon\w*|zalup\w*)$",
+)]
+
+
+def _profanity_candidates(text):
+    t = (text or "").lower().replace("ё", "е")
+    tokens = re.findall(r"[^\W\d_]+", t)
+    cands = set(tokens)
+    for chunk in t.split():                       # х*й, б.л.я.т.ь, с-у-к-а
+        c = re.sub(r"[\W\d_]+", "", chunk)
+        if c:
+            cands.add(c)
+    run = []                                      # б л я т ь (буквы через пробел)
+    for tk in tokens + [""]:
+        if len(tk) == 1:
+            run.append(tk)
+        else:
+            if len(run) >= 3:
+                cands.add("".join(run))
+            run = []
+    return cands
+
+
+def find_profanity(text):
+    """Возвращает найденное слово или None."""
+    for raw in _profanity_candidates(text):
+        if _CYR.search(raw):
+            w = re.sub(r"(.)\1+", r"\1", raw.translate(_LAT_LOOK).translate(_KZ_TO_BASE))
+            if any(p.search(w) for p in _HARD_RU_KZ):
+                return raw
+        elif any(p.search(raw) for p in _HARD_EN):
+            return raw
+    return None
+
+
+GROUP_TYPES = ("group", "supergroup")
+
+
+async def _moderate_group_message(msg):
+    """True — сообщение удалено, автор забанен (дальше его обрабатывать не надо)."""
+    if not isinstance(msg, types.Message) or msg.chat.type not in GROUP_TYPES:
+        return False
+    user = msg.from_user
+    if not user or user.is_bot or msg.sender_chat or msg.is_automatic_forward:
+        return False
+    word = find_profanity(msg.text or msg.caption or "")
+    if not word or user.id == ADMIN_ID:
+        return False
+    member = await bot.get_chat_member(msg.chat.id, user.id)
+    if member.status in ("creator", "administrator"):
+        return False
+    try:
+        await msg.delete()
+    except Exception as e:
+        logger.warning(f"Модерация: не удалось удалить сообщение: {e}")
+    try:
+        await bot.ban_chat_member(msg.chat.id, user.id)
+    except Exception as e:
+        logger.warning(f"Модерация: не удалось забанить в группе: {e}")
+    ban_user(user.id, f"Автобан в группе: мат ({word})")
+    try:
+        await bot.send_message(
+            ADMIN_ID,
+            f"⚠️ Автобан в группе «{msg.chat.title}»\n\n"
+            f"👤 {user.first_name}\n🆔 ID: {user.id}\n@{user.username or 'нет username'}\n\n"
+            f"💬 Написал: {(msg.text or msg.caption or '')[:100]}\n📝 Слово: {word}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔓 Разбанить", callback_data=f"gunban_{msg.chat.id}_{user.id}")]
+            ])
+        )
+    except Exception:
+        pass
+    return True
+
+
+class GroupModerationMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        try:
+            if await _moderate_group_message(event):
+                return
+        except Exception as e:
+            logger.warning(f"Модерация: ошибка {e}")
+        return await handler(event, data)
+
+
+# outer — срабатывает ДО антифлуда, поэтому второй мат подряд не пропустится
+dp.message.outer_middleware(GroupModerationMiddleware())
+dp.edited_message.outer_middleware(GroupModerationMiddleware())
+
+
+@dp.edited_message(F.chat.type.in_({"group", "supergroup"}))
+async def _edited_group_noop(message: types.Message):
+    # Нужен, чтобы Telegram присылал боту изменённые сообщения (их проверяет middleware выше)
+    return
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("gunban_"))
+async def group_unban_callback(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("❌ Рұқсат жоқ!", show_alert=True)
+        return
+    _, chat_id, uid = callback.data.split("_")
+    unban_user(int(uid))
+    try:
+        await bot.unban_chat_member(int(chat_id), int(uid), only_if_banned=True)
+    except Exception as e:
+        logger.warning(f"Разбан в группе не удался: {e}")
+    await callback.answer(f"✅ {uid} разбанен", show_alert=True)
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+
+# =====================================================================
+# ПОИСК: результаты без повторов + тома одной книги в одной кнопке
+# =====================================================================
+_FLAG = {"rus": "🇷🇺", "kaz": "🇰🇿", "eng": "🇬🇧"}
+_PART_RE = re.compile(r"\b(?:часть|ч|том|т|бөлім|vol|volume|part|pt)\.?\s*(\d+)\b", re.I)
+
+
+def _book_title(bk):
+    return (bk.get("file_name", "").replace(".pdf", "").replace(".djvu", "")
+            .replace(".epub", "").replace("_", " ").strip())
+
+
+def _series_name(title):
+    return re.sub(r"\s+", " ", _PART_RE.sub(" ", title)).strip(" -–—,.")
+
+
+def _part_no(bk):
+    m = _PART_RE.search(_book_title(bk))
+    return int(m.group(1)) if m else 0
+
+
+def build_result_rows(books, max_rows=10):
+    """books: [(sc, lang, idx, bk)] -> (кнопки, сколько книг показано).
+    Тома одной серии («Часть 1/2/3») сворачиваются в одну кнопку."""
+    groups, order = {}, []
+    for sc, lang, idx, bk in books:
+        key = (sc, lang, _series_name(_book_title(bk)).lower())
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append((sc, lang, idx, bk))
+    rows, shown = [], 0
+    for key in order:
+        if len(rows) >= max_rows:
+            break
+        items = groups[key]
+        sc, lang, skey = key
+        flag = _FLAG.get(lang, "")
+        if 2 <= len(items) <= 6 and len(skey) >= 6:
+            items.sort(key=lambda it: (_part_no(it[3]), it[2]))
+            ids = ".".join(str(it[2]) for it in items)
+            name = _series_name(_book_title(items[0][3]))[:30]
+            rows.append([InlineKeyboardButton(
+                text=f"{flag} 📚 {name} ({len(items)})", callback_data=f"bs_{sc}_{lang}_{ids}")])
+        else:
+            for sc_, lang_, idx_, bk_ in items:
+                rows.append([InlineKeyboardButton(
+                    text=f"{flag} {_book_title(bk_)[:35]}", callback_data=f"bk_{sc_}_{lang_}_{idx_}")])
+        shown += len(items)
+    return rows[:max_rows], shown
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("bs_"))
+async def series_handler(callback: types.CallbackQuery):
+    try:
+        _, sc, lang, ids = callback.data.split("_", 3)
+        books = BOOKS_DB.get(sc, {}).get(lang, [])
+        idxs = [int(s) for s in ids.split(".") if int(s) < len(books)]
+    except (ValueError, KeyError):
+        await callback.answer("❌ Кітап табылмады!", show_alert=True)
+        return
+    if not idxs:
+        await callback.answer("❌ Кітап табылмады!", show_alert=True)
+        return
+    flag = _FLAG.get(lang, "")
+    rows = [[InlineKeyboardButton(text=f"{flag} {_book_title(books[i])[:40]}",
+                                  callback_data=f"bk_{sc}_{lang}_{i}")] for i in idxs]
+    rows.append([InlineKeyboardButton(text="🏠 Таңдаулар / Меню / Menu", callback_data="go_main_menu")])
+    try:
+        await callback.message.edit_text(
+            f"📚 {_series_name(_book_title(books[idxs[0]]))}\n\n👇 Таңдаңыз / Выберите:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    except Exception as e:
+        logger.warning(f"series_handler: {e}")
+    await callback.answer()
+
+
+# =====================================================================
+# ЭЛЕКТРОННЫЕ КНИГИ (elib.kz): без файла — только текст и ссылка
+# =====================================================================
+EXT_BOOK_DOMAINS = ("elib.kz",)
+
+
+def _extract_ext_book_url(msg):
+    urls = re.findall(r"https?://\S+", getattr(msg, "text", "") or "")
+    for e in (getattr(msg, "entities", None) or []):
+        u = getattr(e, "url", None)
+        if u:
+            urls.append(u)
+    for u in urls:
+        u = u.rstrip(").,;»")
+        if any(d in u.lower() for d in EXT_BOOK_DOMAINS):
+            return u
+    return None
+
+
+def link_book_text(bk, subject_name="", lang_name=""):
+    """Текст карточки электронной книги (HTML)."""
+    lines = [l.strip() for l in (bk.get("caption") or "").splitlines() if l.strip()]
+    lines = [l for l in lines if re.search(r"[^\W\d_]", re.sub(r"#\S+", "", l))]   # без строк из одних хэштегов
+    body = lines[1:] if len(lines) > 1 else []
+    out = [f"📖 <b>{_html_x.escape(_book_title(bk)[:120])}</b>"]
+    if body:
+        out.append("")
+        out.extend(_html_x.escape(l) for l in body)
+    if subject_name or lang_name:
+        out.append("")
+        if subject_name:
+            out.append(f"📚 Пән: {_html_x.escape(subject_name)}")
+        if lang_name:
+            out.append(f"🌐 Тіл: {lang_name}")
+    out.append("\n📌 @library_adasan")
+    return "\n".join(out)
+# <<< ADASAN_EXTRAS_END
+
+
 # Антиспам трекер
 spam_tracker = {}  # {user_id: [datetime, ...]}
 
@@ -1504,8 +1768,14 @@ async def bookpage_handler(callback: types.CallbackQuery):
 
 def book_card_keyboard(subject_code, lang, idx, url):
     likes, dislikes = get_votes(url)
+    _bk = BOOKS_DB.get(subject_code, {}).get(lang, [])
+    _ext = _bk[idx].get("ext_url") if idx < len(_bk) else None
+    if _ext:
+        first_btn = InlineKeyboardButton(text="📖 Оқу / Читать онлайн", url=_ext)
+    else:
+        first_btn = InlineKeyboardButton(text="📥 Жүктеу / Скачать / Download", url=url)
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📥 Жүктеу / Скачать / Download", url=url)],
+        [first_btn],
         [InlineKeyboardButton(text="⭐ Таңдаулыға қосу", callback_data=f"fav_add_{subject_code}_{lang}_{idx}")],
         [InlineKeyboardButton(text="📌 Закладка қосу / Добавить закладку", callback_data=f"bmark_start_{subject_code}_{lang}_{idx}")],
         [
@@ -1541,7 +1811,17 @@ async def bookopen_handler(callback: types.CallbackQuery):
     )
     keyboard = book_card_keyboard(subject_code, lang, idx, book["url"])
     sent = False
-    cover_id = book.get("photo_message_id")
+    if book.get("ext_url"):
+        try:
+            await bot.send_message(
+                callback.message.chat.id,
+                link_book_text(book, subject_name, lang_name),
+                parse_mode="HTML", reply_markup=keyboard, disable_web_page_preview=True,
+            )
+            sent = True
+        except Exception as e:
+            logger.warning(f"Карточка электронной книги не отправилась: {e}")
+    cover_id = None if book.get("ext_url") else book.get("photo_message_id")
     if cover_id:
         # Обложка берётся из канала (ничего не хранится в архиве бота)
         try:
@@ -2187,6 +2467,28 @@ async def update_books_command(message: types.Message):
                     system_lang_code="ru-RU",
                 ) as client:
                     async for msg in client.iter_messages(CHANNEL, limit=5000):
+                        ext_url = None if isinstance(msg.media, MessageMediaDocument) else _extract_ext_book_url(msg)
+                        if ext_url:
+                            # Электронная книга (elib.kz): без файла, только текст и ссылка
+                            cap_clean = re.sub(r"https?://\S+", "", msg.text or "").strip()
+                            first = next((l for l in cap_clean.splitlines() if l.strip()), "")
+                            title = re.sub(r"^[^\w]+", "", first).strip() or "Электронная книга"
+                            subj = detect_subj(title + " " + cap_clean)
+                            lang = detect_lang(title + " " + cap_clean)
+                            if any(ch in (title + cap_clean).lower() for ch in "ңғүұқәөһі"):
+                                lang = "kaz"
+                            if subj not in new_db:
+                                new_db[subj] = {"rus": [], "kaz": [], "eng": []}
+                            new_db[subj][lang].append({
+                                "message_id": msg.id,
+                                "file_name":  title[:120],
+                                "caption":    cap_clean[:300],
+                                "url":        f"https://t.me/library_adasan/{msg.id}",
+                                "ext_url":    ext_url,
+                            })
+                            timeline.append((msg.id, False, msg.date))   # чтобы не стала «обложкой» соседнего файла
+                            total += 1
+                            continue
                         timeline.append((msg.id, isinstance(msg.media, MessageMediaPhoto), msg.date))
                         if not (msg.media and isinstance(msg.media, MessageMediaDocument)):
                             continue
@@ -2615,6 +2917,18 @@ _group_chat_last = {}
 async def _send_book_to_group(message, sc, lang, idx, bk):
     """Копирует файл из канала в группу. Если не вышло — отправляет карточку со ссылкой."""
     url = bk.get("url", "")
+    if bk.get("ext_url"):
+        try:
+            await message.reply(
+                link_book_text(bk), parse_mode="HTML", disable_web_page_preview=True,
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="📖 Оқу / Читать онлайн", url=bk["ext_url"])]
+                ])
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"Ответ в группу (электронная книга) не удался: {e}")
+            return False
     name = bk["file_name"].replace(".pdf", "").replace(".djvu", "").replace("_", " ")
     m = re.search(r"/(\d+)$", url)
     cover_id = bk.get("photo_message_id")
@@ -2767,33 +3081,32 @@ async def search(message: types.Message):
     # =============================
     # АВТОБАН ЗА МАТЫ
     # =============================
-    text_lower = text.lower()
-    for mat in MAT_WORDS:
-        if mat in text_lower:
-            ban_user(message.from_user.id, f"Автобан: мат ({mat})")
-            spam_tracker.pop(message.from_user.id, None)
-            await message.answer(
-                "🚫 Сіз бұғатталдыңыз / Вы заблокированы за нецензурную лексику.\n\n"
-                "Егер қате болса:\n"
-                "Если это ошибка, обратитесь:\n\n"
-                "👉 @Tg_Adasan"
+    mat = find_profanity(text)
+    if mat:
+        ban_user(message.from_user.id, f"Автобан: мат ({mat})")
+        spam_tracker.pop(message.from_user.id, None)
+        await message.answer(
+            "🚫 Сіз бұғатталдыңыз / Вы заблокированы за нецензурную лексику.\n\n"
+            "Егер қате болса:\n"
+            "Если это ошибка, обратитесь:\n\n"
+            "👉 @Tg_Adasan"
+        )
+        try:
+            await bot.send_message(
+                ADMIN_ID,
+                f"⚠️ Автобан за мат!\n\n"
+                f"👤 {message.from_user.first_name}\n"
+                f"🆔 ID: {message.from_user.id}\n"
+                f"@{message.from_user.username or 'нет username'}\n\n"
+                f"💬 Написал: {text[:100]}\n"
+                f"📝 Мат: {mat}",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔓 Разбанить", callback_data=f"unban_{message.from_user.id}")]
+                ])
             )
-            try:
-                await bot.send_message(
-                    ADMIN_ID,
-                    f"⚠️ Автобан за мат!\n\n"
-                    f"👤 {message.from_user.first_name}\n"
-                    f"🆔 ID: {message.from_user.id}\n"
-                    f"@{message.from_user.username or 'нет username'}\n\n"
-                    f"💬 Написал: {text[:100]}\n"
-                    f"📝 Мат: {mat}",
-                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="🔓 Разбанить", callback_data=f"unban_{message.from_user.id}")]
-                    ])
-                )
-            except Exception:
-                pass
-            return
+        except Exception:
+            pass
+        return
     # =============================
 
     # 1. Ищем предмет
@@ -2818,22 +3131,24 @@ async def search(message: types.Message):
     is_fuzzy = False
     total_found = len(found_books)
     if not found_books:
-        total_found, found_books = await asyncio.to_thread(fuzzy_find_books, text, 5)
+        total_found, found_books = await asyncio.to_thread(fuzzy_find_books, text, 15)
         is_fuzzy = bool(found_books)
+    else:
+        # «неттер» нашёл русские книги — добавляем и английские (netter), и с опечатками
+        _, extra = await asyncio.to_thread(fuzzy_find_books, text, 20, 0.85)
+        seen = {(sc, lg, ix) for sc, lg, ix, _ in found_books}
+        for it in extra:
+            if (it[0], it[1], it[2]) not in seen:
+                found_books.append(it)
+                seen.add((it[0], it[1], it[2]))
+        total_found = len(found_books)
 
     if found_books:
-        results = found_books[:5]
-        keyboard_rows = []
-        for sc, lang, idx, bk in results:
-            name = bk["file_name"].replace(".pdf","").replace(".djvu","").replace("_"," ")[:35]
-            lang_flag = {"rus": "🇷🇺", "kaz": "🇰🇿", "eng": "🇬🇧"}.get(lang, "")
-            keyboard_rows.append([InlineKeyboardButton(
-                text=f"{lang_flag} {name}", callback_data=f"bk_{sc}_{lang}_{idx}"
-            )])
+        keyboard_rows, shown = build_result_rows(found_books[:20], max_rows=10)
         if is_fuzzy:
             head = "🔍 Дәл сәйкестік жоқ, мүмкін, мынаны іздедіңіз бе?\nТочного совпадения нет, возможно, вы искали:"
         else:
-            head = f"🔍 Табылды: {total_found} кітап (көрсетілген: {len(results)})"
+            head = f"🔍 Табылды: {total_found} кітап (көрсетілген: {shown})"
         await message.answer(
             f"{head}\n\n👇 Таңдаңыз:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
