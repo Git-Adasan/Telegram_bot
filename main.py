@@ -495,6 +495,59 @@ def migrate_db():
 init_db()
 migrate_db()
 
+# =========================
+# ПОЭТАПНЫЙ ЗАПУСК НОВЫХ ФУНКЦИЙ (feature flags)
+# =========================
+# off   — функция выключена для всех
+# admin — функцию видит только администратор (проверка)
+# all   — функцию видят все пользователи
+# Состояние хранится в adasan.db и переживает перезапуск бота.
+# Чтобы добавить новую функцию: впиши её сюда (имя: (описание, стадия по умолчанию))
+# и оберни код в `if feature_enabled("имя", user_id):`.
+FEATURES = {
+    "covers": ("Обложки книг из канала", "admin"),
+    "search_v2": ("Поиск: неттер↔netter, тома одной кнопкой", "admin"),
+    "elib": ("Электронные книги (elib.kz): текст + ссылка", "admin"),
+}
+FEATURE_STAGES = ("off", "admin", "all")
+_feature_cache = {}
+
+def init_feature_flags():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS feature_flags (
+        name TEXT PRIMARY KEY,
+        stage TEXT NOT NULL,
+        updated_at TEXT
+    )""")
+    for name, (_desc, default_stage) in FEATURES.items():
+        # INSERT OR IGNORE: уже выбранную стадию при перезапуске не трогаем
+        c.execute("INSERT OR IGNORE INTO feature_flags (name, stage, updated_at) VALUES (?, ?, ?)",
+                  (name, default_stage, datetime.now().isoformat()))
+    conn.commit()
+    c.execute("SELECT name, stage FROM feature_flags")
+    for name, stage in c.fetchall():
+        _feature_cache[name] = stage
+    conn.close()
+
+def feature_stage(name):
+    return _feature_cache.get(name, "off")   # неизвестная функция = выключена
+
+def feature_enabled(name, user_id):
+    stage = feature_stage(name)
+    return stage == "all" or (stage == "admin" and user_id == ADMIN_ID)
+
+def set_feature_stage(name, stage):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO feature_flags (name, stage, updated_at) VALUES (?, ?, ?)",
+              (name, stage, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+    _feature_cache[name] = stage
+
+init_feature_flags()
+
 import json as _json
 _books_db_path = os.path.join(BASE_DIR, "books_db.json")
 if os.path.exists(_books_db_path):
@@ -612,12 +665,13 @@ def find_profanity(text):
     return None
 
 
+GROUP_MODERATION = True    # False — полностью выключить автобан за мат в группах
 GROUP_TYPES = ("group", "supergroup")
 
 
 async def _moderate_group_message(msg):
     """True — сообщение удалено, автор забанен (дальше его обрабатывать не надо)."""
-    if not isinstance(msg, types.Message) or msg.chat.type not in GROUP_TYPES:
+    if not GROUP_MODERATION or not isinstance(msg, types.Message) or msg.chat.type not in GROUP_TYPES:
         return False
     user = msg.from_user
     if not user or user.is_bot or msg.sender_chat or msg.is_automatic_forward:
@@ -1766,11 +1820,11 @@ async def bookpage_handler(callback: types.CallbackQuery):
         )
     await callback.answer()
 
-def book_card_keyboard(subject_code, lang, idx, url):
+def book_card_keyboard(subject_code, lang, idx, url, user_id=None):
     likes, dislikes = get_votes(url)
     _bk = BOOKS_DB.get(subject_code, {}).get(lang, [])
     _ext = _bk[idx].get("ext_url") if idx < len(_bk) else None
-    if _ext:
+    if _ext and user_id is not None and feature_enabled("elib", user_id):
         first_btn = InlineKeyboardButton(text="📖 Оқу / Читать онлайн", url=_ext)
     else:
         first_btn = InlineKeyboardButton(text="📥 Жүктеу / Скачать / Download", url=url)
@@ -1809,9 +1863,10 @@ async def bookopen_handler(callback: types.CallbackQuery):
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📌 @library_adasan"
     )
-    keyboard = book_card_keyboard(subject_code, lang, idx, book["url"])
+    keyboard = book_card_keyboard(subject_code, lang, idx, book["url"], callback.from_user.id)
     sent = False
-    if book.get("ext_url"):
+    is_elib = bool(book.get("ext_url")) and feature_enabled("elib", callback.from_user.id)
+    if is_elib:
         try:
             await bot.send_message(
                 callback.message.chat.id,
@@ -1821,8 +1876,8 @@ async def bookopen_handler(callback: types.CallbackQuery):
             sent = True
         except Exception as e:
             logger.warning(f"Карточка электронной книги не отправилась: {e}")
-    cover_id = None if book.get("ext_url") else book.get("photo_message_id")
-    if cover_id:
+    cover_id = None if is_elib else book.get("photo_message_id")
+    if cover_id and feature_enabled("covers", callback.from_user.id):
         # Обложка берётся из канала (ничего не хранится в архиве бота)
         try:
             await bot.copy_message(
@@ -2165,6 +2220,48 @@ async def stats_command(message: types.Message):
     await message.answer(text)
 
 # =========================
+# КОМАНДЫ — поэтапный запуск функций (только админ)
+# =========================
+_STAGE_ICON  = {"off": "⛔", "admin": "🧪", "all": "✅"}
+_STAGE_LABEL = {"off": "выключена", "admin": "видит только админ", "all": "видят все"}
+
+@dp.message(Command("features"))
+async def features_command(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ Рұқсат жоқ!")
+        return
+    lines = ["🚦 Новые функции:\n"]
+    for name, (desc, _default) in FEATURES.items():
+        st = feature_stage(name)
+        lines.append(f"{_STAGE_ICON[st]} {name} — {desc}\n    сейчас: {_STAGE_LABEL[st]}")
+    lines.append(
+        "\nИзменить стадию:\n"
+        "/feature <название> admin — проверяю только я\n"
+        "/feature <название> all — включить всем\n"
+        "/feature <название> off — выключить\n\n"
+        "Пример: /feature covers all"
+    )
+    await message.answer("\n".join(lines))
+
+@dp.message(Command("feature"))
+async def feature_command(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ Рұқсат жоқ!")
+        return
+    parts = (message.text or "").split()
+    if len(parts) != 3 or parts[1] not in FEATURES or parts[2] not in FEATURE_STAGES:
+        names = ", ".join(FEATURES) or "—"
+        await message.answer(
+            "Использование: /feature <название> <admin|all|off>\n"
+            f"Доступные функции: {names}\n"
+            "Список со стадиями: /features"
+        )
+        return
+    name, stage = parts[1], parts[2]
+    set_feature_stage(name, stage)
+    await message.answer(f"{_STAGE_ICON[stage]} {name}: {_STAGE_LABEL[stage]}")
+
+# =========================
 # КОМАНДА — бан пользователя (только админ)
 # =========================
 @dp.message(Command("ban"))
@@ -2456,8 +2553,8 @@ async def update_books_command(message: types.Message):
             try:
                 new_db = {}
                 total = 0
-                timeline = []       # (id, это_фото, дата) — все посты канала
-                book_entries = []   # (запись_книги, id_поста, дата) — чтобы потом найти обложки
+                timeline = []       # (id, это_фото, дата, id_альбома) — все посты канала
+                book_entries = []   # (запись_книги, id_поста, дата, id_альбома) — чтобы потом найти обложки
                 session_path = os.path.join(BASE_DIR, "update_session")
                 async with TelegramClient(
                     session_path,
@@ -2486,10 +2583,10 @@ async def update_books_command(message: types.Message):
                                 "url":        f"https://t.me/library_adasan/{msg.id}",
                                 "ext_url":    ext_url,
                             })
-                            timeline.append((msg.id, False, msg.date))   # чтобы не стала «обложкой» соседнего файла
+                            timeline.append((msg.id, False, msg.date, msg.grouped_id))   # не «обложка» соседнего файла
                             total += 1
                             continue
-                        timeline.append((msg.id, isinstance(msg.media, MessageMediaPhoto), msg.date))
+                        timeline.append((msg.id, isinstance(msg.media, MessageMediaPhoto), msg.date, msg.grouped_id))
                         if not (msg.media and isinstance(msg.media, MessageMediaDocument)):
                             continue
                         doc = msg.media.document
@@ -2513,19 +2610,25 @@ async def update_books_command(message: types.Message):
                             "url":        f"https://t.me/library_adasan/{msg.id}",
                         }
                         new_db[subj][lang].append(entry)
-                        book_entries.append((entry, msg.id, msg.date))
+                        book_entries.append((entry, msg.id, msg.date, msg.grouped_id))
                         total += 1
 
                 # Обложка = фото-пост, который стоит ПРЯМО перед файлом (не позже 10 минут).
+                # Если файл в альбоме (несколько файлов одной группой), то сначала идём назад
+                # до первого файла этого альбома — обложка стоит перед ним, и её получают все тома.
                 # У методичек, конспектов и силабусов фото нет — поле photo_message_id не создаётся.
                 timeline.sort(key=lambda t: t[0])
-                prev_of = {timeline[i][0]: timeline[i - 1] for i in range(1, len(timeline))}
+                pos = {t[0]: i for i, t in enumerate(timeline)}
                 covers = 0
-                for entry, mid, mdate in book_entries:
-                    p = prev_of.get(mid)
-                    if p and p[1] and abs((mdate - p[2]).total_seconds()) <= 600:
-                        entry["photo_message_id"] = p[0]
-                        covers += 1
+                for entry, mid, mdate, gid in book_entries:
+                    i = pos[mid]
+                    while gid and i > 0 and timeline[i - 1][3] == gid:
+                        i -= 1
+                    if i > 0:
+                        p = timeline[i - 1]
+                        if p[1] and abs((mdate - p[2]).total_seconds()) <= 600:
+                            entry["photo_message_id"] = p[0]
+                            covers += 1
                 result["covers"] = covers
                 result["new_db"] = new_db
                 result["total"]  = total
@@ -2659,7 +2762,7 @@ async def rate_handler(callback: types.CallbackQuery):
     result = set_vote(callback.from_user.id, book["url"], vote)
     try:
         await callback.message.edit_reply_markup(
-            reply_markup=book_card_keyboard(subject_code, lang, idx, book["url"])
+            reply_markup=book_card_keyboard(subject_code, lang, idx, book["url"], callback.from_user.id)
         )
     except Exception:
         pass
@@ -2917,7 +3020,7 @@ _group_chat_last = {}
 async def _send_book_to_group(message, sc, lang, idx, bk):
     """Копирует файл из канала в группу. Если не вышло — отправляет карточку со ссылкой."""
     url = bk.get("url", "")
-    if bk.get("ext_url"):
+    if bk.get("ext_url") and message.from_user and feature_enabled("elib", message.from_user.id):
         try:
             await message.reply(
                 link_book_text(bk), parse_mode="HTML", disable_web_page_preview=True,
@@ -2932,7 +3035,7 @@ async def _send_book_to_group(message, sc, lang, idx, bk):
     name = bk["file_name"].replace(".pdf", "").replace(".djvu", "").replace("_", " ")
     m = re.search(r"/(\d+)$", url)
     cover_id = bk.get("photo_message_id")
-    if m and cover_id:
+    if m and cover_id and message.from_user and feature_enabled("covers", message.from_user.id):
         try:
             await bot.copy_message(
                 chat_id=message.chat.id,
@@ -3130,10 +3233,11 @@ async def search(message: types.Message):
     # 3.1 Точного совпадения нет -> умный поиск (опечатки + латиница)
     is_fuzzy = False
     total_found = len(found_books)
+    v2 = feature_enabled("search_v2", user_id)
     if not found_books:
-        total_found, found_books = await asyncio.to_thread(fuzzy_find_books, text, 15)
+        total_found, found_books = await asyncio.to_thread(fuzzy_find_books, text, 15 if v2 else 5)
         is_fuzzy = bool(found_books)
-    else:
+    elif v2:
         # «неттер» нашёл русские книги — добавляем и английские (netter), и с опечатками
         _, extra = await asyncio.to_thread(fuzzy_find_books, text, 20, 0.85)
         seen = {(sc, lg, ix) for sc, lg, ix, _ in found_books}
@@ -3144,7 +3248,18 @@ async def search(message: types.Message):
         total_found = len(found_books)
 
     if found_books:
-        keyboard_rows, shown = build_result_rows(found_books[:20], max_rows=10)
+        if v2:
+            keyboard_rows, shown = build_result_rows(found_books[:20], max_rows=10)
+        else:
+            results = found_books[:5]
+            shown = len(results)
+            keyboard_rows = []
+            for sc, lang, idx, bk in results:
+                name = bk["file_name"].replace(".pdf","").replace(".djvu","").replace("_"," ")[:35]
+                lang_flag = {"rus": "🇷🇺", "kaz": "🇰🇿", "eng": "🇬🇧"}.get(lang, "")
+                keyboard_rows.append([InlineKeyboardButton(
+                    text=f"{lang_flag} {name}", callback_data=f"bk_{sc}_{lang}_{idx}"
+                )])
         if is_fuzzy:
             head = "🔍 Дәл сәйкестік жоқ, мүмкін, мынаны іздедіңіз бе?\nТочного совпадения нет, возможно, вы искали:"
         else:
