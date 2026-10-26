@@ -829,11 +829,12 @@ EXT_BOOK_DOMAINS = ("elib.kz",)
 
 
 def _extract_ext_book_url(msg):
-    urls = re.findall(r"https?://\S+", getattr(msg, "text", "") or "")
-    for e in (getattr(msg, "entities", None) or []):
+    urls = []
+    for e in (getattr(msg, "entities", None) or []):      # ссылка-«гиперссылка»
         u = getattr(e, "url", None)
         if u:
             urls.append(u)
+    urls += re.findall(r"https?://[^\s\]\)]+", getattr(msg, "raw_text", None) or getattr(msg, "text", "") or "")
     for u in urls:
         u = u.rstrip(").,;»")
         if any(d in u.lower() for d in EXT_BOOK_DOMAINS):
@@ -844,7 +845,8 @@ def _extract_ext_book_url(msg):
 def link_book_text(bk, subject_name="", lang_name=""):
     """Текст карточки электронной книги (HTML)."""
     lines = [l.strip() for l in (bk.get("caption") or "").splitlines() if l.strip()]
-    lines = [l for l in lines if re.search(r"[^\W\d_]", re.sub(r"#\S+", "", l))]   # без строк из одних хэштегов
+    lines = [l for l in lines if re.search(r"[^\W\d_]", re.sub(r"#\S+", "", l))   # без строк из одних хэштегов
+             and "adasan" not in l.lower()]                                   # и без подписи канала
     body = lines[1:] if len(lines) > 1 else []
     out = [f"📖 <b>{_html_x.escape(_book_title(bk)[:120])}</b>"]
     if body:
@@ -873,10 +875,6 @@ MAT_WORDS = [
     "ахуе", "охуе", "нахуй", "пошел нахуй", "иди нахуй",
     "шайтан", "нокта", "сорай кет", "ит",
 ]
-
-# Закладки — ожидание страницы от юзера
-# {user_id: {"book_name": ..., "book_url": ...}}
-_bookmark_state = {}
 
 # =========================
 # КЛАВИАТУРЫ
@@ -1241,6 +1239,8 @@ def _word_score(qk, bk):
         return 0.95
     if len(qk) >= 4 and qk in bk:
         return 0.9
+    if qk[0] != bk[0]:      # опечатка в первой букве почти не бывает; без этого «Миндубаева» ≈ «Айтбаева»
+        return 0.0
     thr = 0.85 if len(qk) <= 4 else (0.75 if len(qk) <= 6 else 0.7)
     if abs(len(qk) - len(bk)) > max(len(qk), len(bk)) * (1 - thr):
         return 0.0
@@ -1831,7 +1831,6 @@ def book_card_keyboard(subject_code, lang, idx, url, user_id=None):
     return InlineKeyboardMarkup(inline_keyboard=[
         [first_btn],
         [InlineKeyboardButton(text="⭐ Таңдаулыға қосу", callback_data=f"fav_add_{subject_code}_{lang}_{idx}")],
-        [InlineKeyboardButton(text="📌 Закладка қосу / Добавить закладку", callback_data=f"bmark_start_{subject_code}_{lang}_{idx}")],
         [
             InlineKeyboardButton(text=f"👍 {likes}", callback_data=f"rate_up_{subject_code}_{lang}_{idx}"),
             InlineKeyboardButton(text=f"👎 {dislikes}", callback_data=f"rate_dn_{subject_code}_{lang}_{idx}"),
@@ -1927,42 +1926,7 @@ async def fav_add_handler(callback: types.CallbackQuery):
     else:
         await callback.answer("✅ Бұл кітап бұрын қосылған!", show_alert=True)
 
-# =========================
-# CALLBACK — Закладка (начало)
-# =========================
-@dp.callback_query(lambda c: c.data and c.data.startswith("bmark_start_"))
-async def bmark_start_handler(callback: types.CallbackQuery):
-    parts = callback.data.replace("bmark_start_", "").split("_")
-    subject_code = parts[0]
-    lang = parts[1]
-    idx = int(parts[2])
-    book = BOOKS_DB.get(subject_code, {}).get(lang, [])[idx]
-    book_name = book["file_name"].replace(".pdf","").replace(".djvu","").replace("_"," ")[:50]
-    book_url = book["url"]
-    # Сохраняем состояние
-    _bookmark_state[callback.from_user.id] = {
-        "book_name": book_name,
-        "book_url": book_url,
-    }
-    await callback.answer()
-    await bot.send_message(
-        chat_id=callback.message.chat.id,
-        text=f"📌 <b>{book_name}</b>\n\n"
-             f"Бет нөмірін жазыңыз / Напишите номер страницы:\n\n"
-             f"Мысалы: <code>145</code>",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="❌ Бас тарту / Отмена", callback_data="bmark_cancel")]
-        ])
-    )
-
-@dp.callback_query(lambda c: c.data == "bmark_cancel")
-async def bmark_cancel_handler(callback: types.CallbackQuery):
-    _bookmark_state.pop(callback.from_user.id, None)
-    await callback.message.delete()
-    await callback.answer("❌ Отменено")
-
-
+@dp.callback_query(lambda c: c.data and c.data.startswith("fav_del_"))
 async def fav_del_handler(callback: types.CallbackQuery):
     url = callback.data.replace("fav_del_", "")
     remove_favorite(callback.from_user.id, url)
@@ -1995,29 +1959,6 @@ async def fav_del_handler(callback: types.CallbackQuery):
         pass
 
 # =========================
-# CALLBACK — Показать закладки
-# =========================
-@dp.callback_query(lambda c: c.data == "show_bookmarks")
-async def show_bookmarks_callback(callback: types.CallbackQuery):
-    bmarks = get_bookmarks(callback.from_user.id)
-    if not bmarks:
-        await callback.answer("📌 Закладок нет", show_alert=True)
-        return
-    text = "📌 Сіздің бетбелгілеріңіз / Ваши закладки:\n\n"
-    rows = []
-    for bm_id, bn, bu, page, note, created_at in bmarks:
-        date_str = created_at[:10] if created_at else ""
-        text += f"📖 {bn[:30]} — бет/стр. <b>{page}</b> ({date_str})\n"
-        rows.append([
-            InlineKeyboardButton(text=f"📖 {bn[:25]} стр.{page}", url=bu),
-            InlineKeyboardButton(text="🗑", callback_data=f"bmdel_{bm_id}"),
-        ])
-    rows.append([InlineKeyboardButton(text="🏠 Меню", callback_data="go_main_menu")])
-    await callback.message.answer(text, parse_mode="HTML",
-                                  reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-    await callback.answer()
-
-# =========================
 # КНОПКИ НИЖНЕЙ КЛАВИАТУРЫ
 # =========================
 @dp.message(lambda m: m.text and m.text.lower() == "📖 история")
@@ -2044,30 +1985,6 @@ async def history_button(message: types.Message):
         f"📖 Соңғы {len(history)} кітап / Последние {len(history)} книг:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
     )
-
-@dp.message(lambda m: m.text and m.text.lower() == "📌 закладки")
-async def bookmarks_button(message: types.Message):
-    bmarks = get_bookmarks(message.from_user.id)
-    if not bmarks:
-        await message.answer(
-            "📌 Закладок нет\n\nСохранить закладку:\n/bookmark 145 Синельников том 1",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🏠 Меню", callback_data="go_main_menu")]
-            ])
-        )
-        return
-    rows = []
-    text = f"📌 Сіздің бетбелгілеріңіз / Ваши закладки ({len(bmarks)}):\n\n"
-    for bm_id, bname, burl, page, note, created_at in bmarks:
-        date_str = created_at[:10] if created_at else ""
-        text += f"📖 {bname[:30]}\n📄 Бет: {page} | 📅 {date_str}\n\n"
-        rows.append([
-            InlineKeyboardButton(text=f"📖 {bname[:25]} — б.{page}", url=burl) if burl else
-            InlineKeyboardButton(text=f"📖 {bname[:25]} — б.{page}", callback_data="noop"),
-            InlineKeyboardButton(text="🗑", callback_data=f"bmdel_{bm_id}"),
-        ])
-    rows.append([InlineKeyboardButton(text="🏠 Меню", callback_data="go_main_menu")])
-    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 @dp.message(lambda m: m.text and m.text.lower() in SUBJECTS)
 async def open_subject(message: types.Message):
@@ -2382,94 +2299,6 @@ async def unban_callback(callback: types.CallbackQuery):
     except Exception:
         pass
 
-# =========================
-# КОМАНДА — закладки
-# =========================
-@dp.message(Command("bookmark"))
-async def bookmark_command(message: types.Message):
-    """Использование: /bookmark <страница> [название книги]
-    Пример: /bookmark 145 Синельников том 1"""
-    parts = message.text.split(maxsplit=2)
-    if len(parts) < 2:
-        await message.answer(
-            "📌 Закладка / Бетбелгі\n\n"
-            "Использование:\n/bookmark <страница> [название книги]\n\n"
-            "Пример:\n/bookmark 145 Синельников том 1\n\n"
-            "Посмотреть закладки: /bookmarks"
-        )
-        return
-    try:
-        page = int(parts[1])
-    except ValueError:
-        await message.answer("❌ Страница должна быть числом!\nПример: /bookmark 145")
-        return
-    book_note = parts[2] if len(parts) > 2 else "Кітап / Книга"
-    add_bookmark(message.from_user.id, book_note, "", page, "")
-    await message.answer(
-        f"📌 Закладка сохранена!\n\n"
-        f"📖 Кітап: {book_note}\n"
-        f"📄 Бет / Страница: {page}"
-    )
-
-@dp.message(Command("bookmarks"))
-async def bookmarks_command(message: types.Message):
-    bmarks = get_bookmarks(message.from_user.id)
-    if not bmarks:
-        await message.answer(
-            "📌 Закладок нет\n\n"
-            "Сохранить закладку:\n/bookmark 145 Синельников том 1",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🏠 Меню", callback_data="go_main_menu")]
-            ])
-        )
-        return
-    rows = []
-    text = f"📌 Сіздің бетбелгілеріңіз / Ваши закладки ({len(bmarks)}):\n\n"
-    for bm_id, bname, burl, page, note, created_at in bmarks:
-        date_str = created_at[:10] if created_at else ""
-        text += f"📖 {bname[:30]}\n📄 Бет: {page} | 📅 {date_str}\n\n"
-        rows.append([
-            InlineKeyboardButton(text=f"📖 {bname[:25]} — б.{page}", url=burl) if burl else
-            InlineKeyboardButton(text=f"📖 {bname[:25]} — б.{page}", callback_data="noop"),
-            InlineKeyboardButton(text="🗑", callback_data=f"bmdel_{bm_id}"),
-        ])
-    rows.append([InlineKeyboardButton(text="🏠 Меню", callback_data="go_main_menu")])
-    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("bmdel_"))
-async def bookmark_delete_callback(callback: types.CallbackQuery):
-    bm_id = int(callback.data.replace("bmdel_", ""))
-    delete_bookmark(bm_id, callback.from_user.id)
-    await callback.answer("🗑 Өшірілді!", show_alert=True)
-    # Обновляем список
-    bmarks = get_bookmarks(callback.from_user.id)
-    if not bmarks:
-        try:
-            await callback.message.edit_text(
-                "📌 Закладок нет\n\nСохранить: /bookmark 145 Синельников том 1",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="🏠 Меню", callback_data="go_main_menu")]
-                ])
-            )
-        except Exception:
-            pass
-        return
-    rows = []
-    text = f"📌 Закладки ({len(bmarks)}):\n\n"
-    for bm_id2, bname, burl, page, note, created_at in bmarks:
-        date_str = created_at[:10] if created_at else ""
-        text += f"📖 {bname[:30]}\n📄 Бет: {page} | 📅 {date_str}\n\n"
-        rows.append([
-            InlineKeyboardButton(text=f"📖 {bname[:25]} — б.{page}", url=burl) if burl else
-            InlineKeyboardButton(text=f"📖 {bname[:25]} — б.{page}", callback_data="noop"),
-            InlineKeyboardButton(text="🗑", callback_data=f"bmdel_{bm_id2}"),
-        ])
-    rows.append([InlineKeyboardButton(text="🏠 Меню", callback_data="go_main_menu")])
-    try:
-        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-    except Exception:
-        pass
-
 @dp.callback_query(lambda c: c.data == "noop")
 async def noop_callback(callback: types.CallbackQuery):
     await callback.answer()
@@ -2547,7 +2376,7 @@ async def update_books_command(message: types.Message):
                     return attr.file_name
             return "unknown"
 
-        result = {"new_db": {}, "total": 0, "covers": 0, "error": None}
+        result = {"new_db": {}, "total": 0, "covers": 0, "ext": 0, "error": None}
 
         async def collect():
             try:
@@ -2567,7 +2396,7 @@ async def update_books_command(message: types.Message):
                         ext_url = None if isinstance(msg.media, MessageMediaDocument) else _extract_ext_book_url(msg)
                         if ext_url:
                             # Электронная книга (elib.kz): без файла, только текст и ссылка
-                            cap_clean = re.sub(r"https?://\S+", "", msg.text or "").strip()
+                            cap_clean = re.sub(r"https?://\S+", "", msg.raw_text or "").strip()
                             first = next((l for l in cap_clean.splitlines() if l.strip()), "")
                             title = re.sub(r"^[^\w]+", "", first).strip() or "Электронная книга"
                             subj = detect_subj(title + " " + cap_clean)
@@ -2585,6 +2414,7 @@ async def update_books_command(message: types.Message):
                             })
                             timeline.append((msg.id, False, msg.date, msg.grouped_id))   # не «обложка» соседнего файла
                             total += 1
+                            result["ext"] += 1
                             continue
                         timeline.append((msg.id, isinstance(msg.media, MessageMediaPhoto), msg.date, msg.grouped_id))
                         if not (msg.media and isinstance(msg.media, MessageMediaDocument)):
@@ -2626,7 +2456,7 @@ async def update_books_command(message: types.Message):
                         i -= 1
                     if i > 0:
                         p = timeline[i - 1]
-                        if p[1] and abs((mdate - p[2]).total_seconds()) <= 600:
+                        if p[1] and abs((mdate - p[2]).total_seconds()) <= 3600:   # файлы могут грузиться долго
                             entry["photo_message_id"] = p[0]
                             covers += 1
                 result["covers"] = covers
@@ -2672,9 +2502,20 @@ async def update_books_command(message: types.Message):
         await message.answer(
             f"✅ Жаңартылды!\n\n"
             f"📖 Барлығы: {total} кітап\n"
-            f"🖼 Мұқабасы бар / С обложкой: {result['covers']}\n\n"
+            f"🖼 Мұқабасы бар / С обложкой: {result['covers']}\n"
+            f"🔗 Электронных (elib.kz): {result['ext']}\n\n"
             f"{stats_text}"
         )
+        # Хостинг (например, бесплатный Render) при перезапуске возвращает файлы к тем, что в проекте.
+        # Поэтому присылаем свежую базу — её нужно положить в проект вместо старого books_db.json.
+        try:
+            await message.answer_document(
+                FSInputFile(db_path),
+                caption="💾 Свежая books_db.json. Замени ею файл в проекте и задеплой — "
+                        "иначе после перезапуска хостинга новые книги и обложки пропадут."
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось отправить books_db.json: {e}")
 
     except ImportError:
         await message.answer("❌ telethon орнатылмаған!\npip install telethon")
@@ -3120,28 +2961,6 @@ async def search(message: types.Message):
     text = message.text or ""
     user_id = message.from_user.id
 
-    # =============================
-    # ЗАКЛАДКА — ожидание страницы
-    # =============================
-    if user_id in _bookmark_state:
-        page_text = text.strip()
-        if page_text.isdigit():
-            state = _bookmark_state.pop(user_id)
-            add_bookmark(user_id, state["book_name"], state["book_url"], int(page_text))
-            await message.answer(
-                f"📌 Закладка сақталды / Закладка сохранена!\n\n"
-                f"📖 {state['book_name']}\n"
-                f"📄 Бет / Страница: <b>{page_text}</b>",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="📌 Барлық закладкалар", callback_data="show_bookmarks")],
-                    [InlineKeyboardButton(text="🏠 Меню", callback_data="go_main_menu")],
-                ])
-            )
-        else:
-            await message.answer("⚠️ Тек сан жазыңыз / Напишите только число!\nМысалы: <code>145</code>", parse_mode="HTML")
-        return
-
     # Игнорируем неизвестные команды (начинаются с /)
     if text.startswith("/"):
         return
@@ -3299,8 +3118,6 @@ async def main():
         BotCommand(command="favorites", description="⭐ Таңдаулылар"),
         BotCommand(command="chanel",    description="📌 Канал"),
         BotCommand(command="history",    description="📖 История книг"),
-        BotCommand(command="bookmarks", description="📌 Закладки"),
-        BotCommand(command="bookmark",  description="📌 Сохранить закладку"),
         BotCommand(command="popular",   description="🔥 Популярное"),
         BotCommand(command="upload",    description="📤 Материал жіберу"),
     ], scope=BotCommandScopeDefault())
