@@ -899,6 +899,11 @@ def find_subject(query):
                 if score > best_score:
                     best_code, best_score = code, score
 
+    if best_code is None:          # раздел из хэштегов: «стоматология», «пропедевтика»…
+        for code, title in _DYN_NAMES.items():
+            t = _norm_q(title)
+            if len(q) >= 4 and (q in t or t in q):
+                return code
     return best_code
 
 
@@ -1817,6 +1822,8 @@ async def favorites_button(message: types.Message):
 
 @dp.message(lambda m: m.text and m.text.lower() == "📋 барлық пәндер")
 async def all_subjects_button(message: types.Message):
+    await send_catalog(message)   # 14 предметов + разделы из хэштегов
+    return
     await message.answer(
         "📋 Барлық пәндер / Все предметы / All subjects:\n\nПәнді таңдаңыз:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -2318,7 +2325,9 @@ async def update_books_command(message: types.Message):
 
         new_db = result["new_db"]
         total  = result["total"]
+        build_dynamic_catalog(new_db)   # разделы из хэштегов (#пропедевтика и т.д.)
         apply_sort_overrides(new_db)   # ручная сортировка из /sort_other не сбрасывается
+        _refresh_catalog_names(new_db)
 
         db_path = os.path.join(BASE_DIR, "books_db.json")
         with open(db_path, "w", encoding="utf-8") as f:
@@ -2543,6 +2552,220 @@ async def sort_other_callback(callback: types.CallbackQuery):
                                       disable_web_page_preview=True)
     if kb is None:               # разбор закончен — сразу присылаем файлы
         await _sort_send_files()
+
+# =========================
+# КАТАЛОГ ПО ХЭШТЕГАМ (/catalog) — разделы создаются из хэштегов в постах канала
+# =========================
+# --- catalog: logic ---
+# Хэштег, который НЕ является предметом (тип материала и т.п.)
+_CAT_STOP = {
+    "книга", "книги", "учебник", "методичка", "методички", "конспект", "конспекты", "шпаргалка",
+    "шпоры", "лекция", "лекции", "препараты", "сборник", "атлас", "adasan", "library_adasan",
+    "библиотека", "библотека", "pdf", "тест", "тесты",
+}
+# Хэштеги, которые уже относятся к 14 готовым предметам: такие книги каталог не трогает
+_CAT_STATIC_STEMS = (
+    "гист", "цитол", "эмбри", "анат", "биох", "бх", "физио", "физиол", "ішкі", "внутр",
+    "патфиз", "патофиз", "патфизиол", "патан", "патолог", "топ", "операт", "хирург",
+    "фарма", "фармо", "микроб", "генет", "биофиз", "тарих",
+)
+# Книги без хэштега, которые определяем по названию (только из раздела other)
+_CAT_KEYWORDS = (
+    ("пропед", "пропедевтика"), ("эпидем", "эпидемиология"), ("стомат", "стоматология"),
+    ("иммунол", "иммунология"), ("радиолог", "радиология"), ("лучев", "радиология"),
+)
+CATALOG_MIN_BOOKS = 1      # сколько книг нужно, чтобы создать раздел (поставь 2, чтобы убрать одиночки)
+CATALOG_TAKE_MIN = 3       # книги из ГОТОВЫХ предметов (не из other) переносим, только если в разделе от 3 книг
+CATALOG_SIM = 0.8          # насколько похожи хэштеги, чтобы считать их опечаткой одного раздела
+
+_DYN_NAMES = {}            # code -> «📖 Название» для разделов, созданных из хэштегов
+_CAT_TAG_RE = re.compile(r"#(\w+)")
+_CAT_TR = dict(zip("абвгдезийклмнопрстуфхыэ", "abvgdezijklmnoprstufhye"))
+_CAT_TR.update({"ё": "e", "ж": "zh", "ц": "c", "ч": "ch", "ш": "sh", "щ": "sh", "ю": "yu", "я": "ya",
+                "ъ": "", "ь": "", "ә": "a", "і": "i", "ң": "n", "ғ": "g", "ү": "u", "ұ": "u",
+                "қ": "k", "ө": "o", "һ": "h"})
+
+def _cat_norm(s):
+    return (s or "").lower().replace("ё", "е")
+
+def _cat_slug(word):
+    s = "".join(_CAT_TR.get(ch, ch) for ch in _cat_norm(word))
+    return re.sub(r"[^a-z0-9]", "", s)[:20] or "razdel"
+
+def _cat_tags(book):
+    return [_cat_norm(t) for t in _CAT_TAG_RE.findall(book.get("caption", "") or "")]
+
+def _cat_is_static(tag):
+    return tag.startswith(_CAT_STATIC_STEMS)
+
+def _cat_book_tag(book, in_other):
+    """Хэштег-кандидат для раздела каталога или None."""
+    tags = _cat_tags(book)
+    if any(_cat_is_static(t) for t in tags):
+        return None                      # хэштег готового предмета — книгу не трогаем
+    for t in tags:
+        if len(t) >= 4 and t not in _CAT_STOP:
+            return t
+    if in_other:                         # хэштега нет — пробуем по названию (только из other)
+        text = _cat_norm((book.get("file_name", "") or "") + " " + (book.get("caption", "") or ""))
+        for stem, name in _CAT_KEYWORDS:
+            if stem in text:
+                return name
+    return None
+
+def _cat_similar(a, b):
+    from difflib import SequenceMatcher
+    return a[0] == b[0] and SequenceMatcher(None, a, b).ratio() >= CATALOG_SIM
+
+def build_dynamic_catalog(db):
+    """Создаёт разделы из хэштегов (с учётом опечаток) и переносит туда книги.
+    Вызывается из /update_books. Возвращает {code: (название, число_книг)}."""
+    from collections import Counter
+    overrides = _load_sort_overrides()
+    cand = []                                            # (откуда_код, язык, книга, тег)
+    for sc, langs in db.items():
+        for lg, lst in langs.items():
+            for b in lst:
+                if overrides.get(str(b.get("message_id"))) == "other":
+                    continue                              # админ решил оставить в other
+                tag = _cat_book_tag(b, in_other=(sc == "other"))
+                if tag:
+                    cand.append((sc, lg, b, tag))
+    freq = Counter(t for _, _, _, t in cand)
+    heads, head_of = [], {}
+    for tag, _n in sorted(freq.items(), key=lambda kv: (-kv[1], kv[0])):
+        for h in heads:
+            if _cat_similar(tag, h):
+                head_of[tag] = h
+                break
+        else:
+            heads.append(tag)
+            head_of[tag] = tag
+    size_all = Counter(head_of[t] for _, _, _, t in cand)
+    # из готовых предметов (анатомия, внутренние…) берём книгу, только если раздел крупный
+    cand = [c for c in cand if c[0] == "other" or size_all[head_of[c[3]]] >= CATALOG_TAKE_MIN]
+    group_size = Counter(head_of[t] for _, _, _, t in cand)
+    used = set(SUBJECT_NAMES.keys()) - set(_DYN_NAMES.keys())
+    codes = {}
+    for h in heads:
+        if group_size[h] < CATALOG_MIN_BOOKS:
+            continue
+        code, n = _cat_slug(h), 2
+        while code in used:
+            code = f"{_cat_slug(h)[:17]}{n}"; n += 1
+        used.add(code); codes[h] = code
+    summary = {}
+    for sc, lg, b, tag in cand:
+        h = head_of[tag]
+        if h not in codes:
+            continue
+        code = codes[h]
+        for i, x in enumerate(db[sc][lg]):
+            if x is b:
+                db[sc][lg].pop(i)
+                break
+        title = "📖 " + h[:1].upper() + h[1:]
+        b["subject_title"] = title
+        db.setdefault(code, {}).setdefault(lg, []).append(b)
+        summary[code] = (title, summary.get(code, ("", 0))[1] + 1)
+    for code in codes.values():
+        for lg in db.get(code, {}):
+            db[code][lg].sort(key=lambda x: x["message_id"], reverse=True)
+    return summary
+
+def _refresh_catalog_names(db):
+    """Названия разделов хранятся прямо в книгах (subject_title) — отдельного файла не нужно."""
+    for code in list(_DYN_NAMES):
+        SUBJECT_NAMES.pop(code, None)                   # убираем названия исчезнувших разделов
+    _DYN_NAMES.clear()
+    static_codes = set(SUBJECTS.values())
+    for code, langs in db.items():
+        if code == "other" or code in static_codes:
+            continue
+        for lst in langs.values():
+            for b in lst:
+                if b.get("subject_title"):
+                    _DYN_NAMES[code] = b["subject_title"]
+                    break
+            if code in _DYN_NAMES:
+                break
+    for code, name in _DYN_NAMES.items():
+        SUBJECT_NAMES[code] = name
+
+def _catalog_extras():
+    out = []
+    for code in _DYN_NAMES:
+        n = sum(len(v) for v in BOOKS_DB.get(code, {}).values())
+        if n:
+            out.append((n, code))
+    out.sort(key=lambda t: (-t[0], t[1]))
+    return out[:40]
+# --- catalog: handlers ---
+_refresh_catalog_names(BOOKS_DB)
+
+_orig_send_subject_menu = send_subject_menu
+async def send_subject_menu(chat_id, code):
+    """Раздел из хэштегов открывается сразу списком языков (без силлабусов и препаратов)."""
+    if code in _DYN_NAMES:
+        total = sum(len(v) for v in BOOKS_DB.get(code, {}).values())
+        await bot.send_message(
+            chat_id,
+            f"{_DYN_NAMES[code]}\n\n📖 Барлығы: {total} кітап\n\n"
+            "👇 Тілді таңдаңыз / Выберите язык / Choose language:",
+            reply_markup=lang_inline(code)
+        )
+        return
+    await _orig_send_subject_menu(chat_id, code)
+
+_orig_lang_inline = lang_inline
+def lang_inline(subject_code):
+    kb = _orig_lang_inline(subject_code)
+    if subject_code not in _DYN_NAMES:
+        return kb
+    rows = []
+    for row in kb.inline_keyboard:                   # «Назад» ведёт в каталог, а не в меню предмета
+        rows.append([
+            InlineKeyboardButton(text=b.text, callback_data="catalog_open")
+            if b.callback_data == f"subject_{subject_code}" else b
+            for b in row
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def catalog_keyboard():
+    rows, row = [], []
+    for label, code in SUBJECTS.items():
+        row.append(InlineKeyboardButton(text=SUBJECT_NAMES.get(code, label), callback_data=f"subject_{code}"))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    row = []
+    for n, code in _catalog_extras():
+        row.append(InlineKeyboardButton(text=f"{_DYN_NAMES[code]} ({n})", callback_data=f"books_{code}"))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton(text="🏠 Таңдаулар / Меню / Menu", callback_data="go_main_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+CATALOG_TEXT = "📋 Барлық пәндер / Все предметы / All subjects:\n\nПәнді таңдаңыз:"
+
+async def send_catalog(message: types.Message):
+    await message.answer(CATALOG_TEXT, reply_markup=catalog_keyboard())
+
+@dp.message(Command("catalog"))
+async def catalog_command(message: types.Message):
+    await send_catalog(message)
+
+@dp.callback_query(lambda c: c.data == "catalog_open")
+async def catalog_open_callback(callback: types.CallbackQuery):
+    await bot.send_message(callback.message.chat.id, CATALOG_TEXT, reply_markup=catalog_keyboard())
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.answer()
 
 # ---------- Популярное ----------
 async def send_popular(message: types.Message):
@@ -3103,6 +3326,7 @@ async def main():
         BotCommand(command="bookmarks", description="📌 Закладки"),
         BotCommand(command="bookmark",  description="📌 Сохранить закладку"),
         BotCommand(command="popular",   description="🔥 Популярное"),
+        BotCommand(command="catalog",   description="📋 Каталог / Все предметы"),
         BotCommand(command="upload",    description="📤 Материал жіберу"),
     ], scope=BotCommandScopeDefault())
 
@@ -3113,6 +3337,7 @@ async def main():
         BotCommand(command="favorites",    description="⭐ Таңдаулылар"),
         BotCommand(command="chanel",       description="📌 Канал"),
         BotCommand(command="popular",      description="🔥 Популярное"),
+        BotCommand(command="catalog",      description="📋 Каталог / Все предметы"),
         BotCommand(command="upload",       description="📤 Материал жіберу"),
         BotCommand(command="stats",        description="📊 Статистика"),
         BotCommand(command="update_books", description="🔄 Кітаптарды жаңарту"),
