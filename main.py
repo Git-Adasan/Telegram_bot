@@ -495,59 +495,6 @@ def migrate_db():
 init_db()
 migrate_db()
 
-# =========================
-# ПОЭТАПНЫЙ ЗАПУСК НОВЫХ ФУНКЦИЙ (feature flags)
-# =========================
-# off   — функция выключена для всех
-# admin — функцию видит только администратор (проверка)
-# all   — функцию видят все пользователи
-# Состояние хранится в adasan.db и переживает перезапуск бота.
-# Чтобы добавить новую функцию: впиши её сюда (имя: (описание, стадия по умолчанию))
-# и оберни код в `if feature_enabled("имя", user_id):`.
-FEATURES = {
-    "covers": ("Обложки книг из канала", "admin"),
-    "search_v2": ("Поиск: неттер↔netter, тома одной кнопкой", "admin"),
-    "elib": ("Электронные книги (elib.kz): текст + ссылка", "admin"),
-}
-FEATURE_STAGES = ("off", "admin", "all")
-_feature_cache = {}
-
-def init_feature_flags():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""CREATE TABLE IF NOT EXISTS feature_flags (
-        name TEXT PRIMARY KEY,
-        stage TEXT NOT NULL,
-        updated_at TEXT
-    )""")
-    for name, (_desc, default_stage) in FEATURES.items():
-        # INSERT OR IGNORE: уже выбранную стадию при перезапуске не трогаем
-        c.execute("INSERT OR IGNORE INTO feature_flags (name, stage, updated_at) VALUES (?, ?, ?)",
-                  (name, default_stage, datetime.now().isoformat()))
-    conn.commit()
-    c.execute("SELECT name, stage FROM feature_flags")
-    for name, stage in c.fetchall():
-        _feature_cache[name] = stage
-    conn.close()
-
-def feature_stage(name):
-    return _feature_cache.get(name, "off")   # неизвестная функция = выключена
-
-def feature_enabled(name, user_id):
-    stage = feature_stage(name)
-    return stage == "all" or (stage == "admin" and user_id == ADMIN_ID)
-
-def set_feature_stage(name, stage):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO feature_flags (name, stage, updated_at) VALUES (?, ?, ?)",
-              (name, stage, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
-    _feature_cache[name] = stage
-
-init_feature_flags()
-
 import json as _json
 _books_db_path = os.path.join(BASE_DIR, "books_db.json")
 if os.path.exists(_books_db_path):
@@ -580,6 +527,8 @@ class BanAndFloodMiddleware(BaseMiddleware):
                 except Exception:
                     pass
             return
+        if user_id == ADMIN_ID:
+            return await handler(event, data)
         # Флуд
         if hasattr(event, 'data'):  # callback
             if is_flood_callback(user_id):
@@ -596,273 +545,6 @@ class BanAndFloodMiddleware(BaseMiddleware):
 dp.message.middleware(BanAndFloodMiddleware())
 dp.callback_query.middleware(BanAndFloodMiddleware())
 
-# >>> ADASAN_EXTRAS_BEGIN
-# =====================================================================
-# МОДЕРАЦИЯ: мат и оскорбления (русский / казахский / английский)
-# =====================================================================
-import html as _html_x
-
-_CYR = re.compile(r"[а-яёәіңғүұқөһ]")
-_KZ_TO_BASE = str.maketrans("қңұүіөәғһ", "кнууиоагх")
-_LAT_LOOK = str.maketrans("aeopcxyk", "аеорсхук")   # латиница, похожая на кириллицу
-_PREF = r"(?:вы|за|на|по|до|об|от|съ|раз|рас|под|пере|при|недо|не|про|пре|из|ис|с|у|о|а|ни)?"
-
-# Слова проверяются ЦЕЛИКОМ (с началом слова), а не как кусок текста.
-# Поэтому «бляшка», «ребёнок», «хлеба», «витамин», «педикулёз» НЕ срабатывают.
-_HARD_RU_KZ = [re.compile(p) for p in (
-    rf"^{_PREF}ху[йеяию]",                       # хуй, нахуй, похуй, хуёвый
-    r"пизд",
-    r"бляд|блят|^бля$",
-    rf"^{_PREF}еб(?:ан|ал|ат|ну|уч|ло|ис|ен|ок$)",  # ебать, ебанутый, уебок...
-    r"^д[ао]лб[ао]еб",                           # долбоёб, далбаёб
-    r"^мудак|^мудил|^мудозв",
-    r"^пидор|^пидар|^пидр|^педераст",
-    r"^залуп|^шлюх|^ублюд|^гандон|^гондон",
-    r"^мразь$|^мразот",
-    r"^сук[аиуе]$|^сукой$|^сучк|^сучар",
-    r"^чмо$|^чмошн|^тварь$|^тварин",
-    # казахский
-    r"^кот(?:ак|ек)\w{0,4}$|^амын(?:ды|а|нан|да)?$|^сиктир|^каншы[кг]|^жезокше",
-)]
-_HARD_EN = [re.compile(p) for p in (
-    r"^\w*f+u+c+k+\w*$", r"^(fack|facking|fuk|fuking|fcuk|fcking|fck|fvck)$",
-    r"^motherf\w+$", r"^cunts?$", r"^bitch(es|y)?$", r"^assholes?$", r"^dickheads?$",
-    r"^(whore|slut)s?$", r"^fagg?ots?$", r"^nigg(er|a)s?$",
-    # русский мат латиницей
-    r"^(blyat\w*|blyad\w*|blya|pizd\w*|nahuy|nahui|nahuj|huy|xuy|huj|"
-    r"ebat\w*|ebal\w*|ebanat\w*|pidor\w*|pidar\w*|mudak\w*|gandon\w*|zalup\w*)$",
-)]
-
-
-def _profanity_candidates(text):
-    t = (text or "").lower().replace("ё", "е")
-    tokens = re.findall(r"[^\W\d_]+", t)
-    cands = set(tokens)
-    for chunk in t.split():                       # х*й, б.л.я.т.ь, с-у-к-а
-        c = re.sub(r"[\W\d_]+", "", chunk)
-        if c:
-            cands.add(c)
-    run = []                                      # б л я т ь (буквы через пробел)
-    for tk in tokens + [""]:
-        if len(tk) == 1:
-            run.append(tk)
-        else:
-            if len(run) >= 3:
-                cands.add("".join(run))
-            run = []
-    return cands
-
-
-def find_profanity(text):
-    """Возвращает найденное слово или None."""
-    for raw in _profanity_candidates(text):
-        if _CYR.search(raw):
-            w = re.sub(r"(.)\1+", r"\1", raw.translate(_LAT_LOOK).translate(_KZ_TO_BASE))
-            if any(p.search(w) for p in _HARD_RU_KZ):
-                return raw
-        elif any(p.search(raw) for p in _HARD_EN):
-            return raw
-    return None
-
-
-GROUP_MODERATION = True    # False — полностью выключить автобан за мат в группах
-GROUP_TYPES = ("group", "supergroup")
-
-
-async def _moderate_group_message(msg):
-    """True — сообщение удалено, автор забанен (дальше его обрабатывать не надо)."""
-    if not GROUP_MODERATION or not isinstance(msg, types.Message) or msg.chat.type not in GROUP_TYPES:
-        return False
-    user = msg.from_user
-    if not user or user.is_bot or msg.sender_chat or msg.is_automatic_forward:
-        return False
-    word = find_profanity(msg.text or msg.caption or "")
-    if not word or user.id == ADMIN_ID:
-        return False
-    member = await bot.get_chat_member(msg.chat.id, user.id)
-    if member.status in ("creator", "administrator"):
-        return False
-    try:
-        await msg.delete()
-    except Exception as e:
-        logger.warning(f"Модерация: не удалось удалить сообщение: {e}")
-    try:
-        await bot.ban_chat_member(msg.chat.id, user.id)
-    except Exception as e:
-        logger.warning(f"Модерация: не удалось забанить в группе: {e}")
-    ban_user(user.id, f"Автобан в группе: мат ({word})")
-    try:
-        await bot.send_message(
-            ADMIN_ID,
-            f"⚠️ Автобан в группе «{msg.chat.title}»\n\n"
-            f"👤 {user.first_name}\n🆔 ID: {user.id}\n@{user.username or 'нет username'}\n\n"
-            f"💬 Написал: {(msg.text or msg.caption or '')[:100]}\n📝 Слово: {word}",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔓 Разбанить", callback_data=f"gunban_{msg.chat.id}_{user.id}")]
-            ])
-        )
-    except Exception:
-        pass
-    return True
-
-
-class GroupModerationMiddleware(BaseMiddleware):
-    async def __call__(self, handler, event, data):
-        try:
-            if await _moderate_group_message(event):
-                return
-        except Exception as e:
-            logger.warning(f"Модерация: ошибка {e}")
-        return await handler(event, data)
-
-
-# outer — срабатывает ДО антифлуда, поэтому второй мат подряд не пропустится
-dp.message.outer_middleware(GroupModerationMiddleware())
-dp.edited_message.outer_middleware(GroupModerationMiddleware())
-
-
-@dp.edited_message(F.chat.type.in_({"group", "supergroup"}))
-async def _edited_group_noop(message: types.Message):
-    # Нужен, чтобы Telegram присылал боту изменённые сообщения (их проверяет middleware выше)
-    return
-
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("gunban_"))
-async def group_unban_callback(callback: types.CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
-        await callback.answer("❌ Рұқсат жоқ!", show_alert=True)
-        return
-    _, chat_id, uid = callback.data.split("_")
-    unban_user(int(uid))
-    try:
-        await bot.unban_chat_member(int(chat_id), int(uid), only_if_banned=True)
-    except Exception as e:
-        logger.warning(f"Разбан в группе не удался: {e}")
-    await callback.answer(f"✅ {uid} разбанен", show_alert=True)
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
-
-
-# =====================================================================
-# ПОИСК: результаты без повторов + тома одной книги в одной кнопке
-# =====================================================================
-_FLAG = {"rus": "🇷🇺", "kaz": "🇰🇿", "eng": "🇬🇧"}
-_PART_RE = re.compile(r"\b(?:часть|ч|том|т|бөлім|vol|volume|part|pt)\.?\s*(\d+)\b", re.I)
-
-
-def _book_title(bk):
-    return (bk.get("file_name", "").replace(".pdf", "").replace(".djvu", "")
-            .replace(".epub", "").replace("_", " ").strip())
-
-
-def _series_name(title):
-    return re.sub(r"\s+", " ", _PART_RE.sub(" ", title)).strip(" -–—,.")
-
-
-def _part_no(bk):
-    m = _PART_RE.search(_book_title(bk))
-    return int(m.group(1)) if m else 0
-
-
-def build_result_rows(books, max_rows=10):
-    """books: [(sc, lang, idx, bk)] -> (кнопки, сколько книг показано).
-    Тома одной серии («Часть 1/2/3») сворачиваются в одну кнопку."""
-    groups, order = {}, []
-    for sc, lang, idx, bk in books:
-        key = (sc, lang, _series_name(_book_title(bk)).lower())
-        if key not in groups:
-            groups[key] = []
-            order.append(key)
-        groups[key].append((sc, lang, idx, bk))
-    rows, shown = [], 0
-    for key in order:
-        if len(rows) >= max_rows:
-            break
-        items = groups[key]
-        sc, lang, skey = key
-        flag = _FLAG.get(lang, "")
-        if 2 <= len(items) <= 6 and len(skey) >= 6:
-            items.sort(key=lambda it: (_part_no(it[3]), it[2]))
-            ids = ".".join(str(it[2]) for it in items)
-            name = _series_name(_book_title(items[0][3]))[:30]
-            rows.append([InlineKeyboardButton(
-                text=f"{flag} 📚 {name} ({len(items)})", callback_data=f"bs_{sc}_{lang}_{ids}")])
-        else:
-            for sc_, lang_, idx_, bk_ in items:
-                rows.append([InlineKeyboardButton(
-                    text=f"{flag} {_book_title(bk_)[:35]}", callback_data=f"bk_{sc_}_{lang_}_{idx_}")])
-        shown += len(items)
-    return rows[:max_rows], shown
-
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("bs_"))
-async def series_handler(callback: types.CallbackQuery):
-    try:
-        _, sc, lang, ids = callback.data.split("_", 3)
-        books = BOOKS_DB.get(sc, {}).get(lang, [])
-        idxs = [int(s) for s in ids.split(".") if int(s) < len(books)]
-    except (ValueError, KeyError):
-        await callback.answer("❌ Кітап табылмады!", show_alert=True)
-        return
-    if not idxs:
-        await callback.answer("❌ Кітап табылмады!", show_alert=True)
-        return
-    flag = _FLAG.get(lang, "")
-    rows = [[InlineKeyboardButton(text=f"{flag} {_book_title(books[i])[:40]}",
-                                  callback_data=f"bk_{sc}_{lang}_{i}")] for i in idxs]
-    rows.append([InlineKeyboardButton(text="🏠 Таңдаулар / Меню / Menu", callback_data="go_main_menu")])
-    try:
-        await callback.message.edit_text(
-            f"📚 {_series_name(_book_title(books[idxs[0]]))}\n\n👇 Таңдаңыз / Выберите:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-    except Exception as e:
-        logger.warning(f"series_handler: {e}")
-    await callback.answer()
-
-
-# =====================================================================
-# ЭЛЕКТРОННЫЕ КНИГИ (elib.kz): без файла — только текст и ссылка
-# =====================================================================
-EXT_BOOK_DOMAINS = ("elib.kz",)
-
-
-def _extract_ext_book_url(msg):
-    urls = []
-    for e in (getattr(msg, "entities", None) or []):      # ссылка-«гиперссылка»
-        u = getattr(e, "url", None)
-        if u:
-            urls.append(u)
-    urls += re.findall(r"https?://[^\s\]\)]+", getattr(msg, "raw_text", None) or getattr(msg, "text", "") or "")
-    for u in urls:
-        u = u.rstrip(").,;»")
-        if any(d in u.lower() for d in EXT_BOOK_DOMAINS):
-            return u
-    return None
-
-
-def link_book_text(bk, subject_name="", lang_name=""):
-    """Текст карточки электронной книги (HTML)."""
-    lines = [l.strip() for l in (bk.get("caption") or "").splitlines() if l.strip()]
-    lines = [l for l in lines if re.search(r"[^\W\d_]", re.sub(r"#\S+", "", l))   # без строк из одних хэштегов
-             and "adasan" not in l.lower()]                                   # и без подписи канала
-    body = lines[1:] if len(lines) > 1 else []
-    out = [f"📖 <b>{_html_x.escape(_book_title(bk)[:120])}</b>"]
-    if body:
-        out.append("")
-        out.extend(_html_x.escape(l) for l in body)
-    if subject_name or lang_name:
-        out.append("")
-        if subject_name:
-            out.append(f"📚 Пән: {_html_x.escape(subject_name)}")
-        if lang_name:
-            out.append(f"🌐 Тіл: {lang_name}")
-    out.append("\n📌 @library_adasan")
-    return "\n".join(out)
-# <<< ADASAN_EXTRAS_END
-
-
 # Антиспам трекер
 spam_tracker = {}  # {user_id: [datetime, ...]}
 
@@ -875,6 +557,33 @@ MAT_WORDS = [
     "ахуе", "охуе", "нахуй", "пошел нахуй", "иди нахуй",
     "шайтан", "нокта", "сорай кет", "ит",
 ]
+
+# Мат ищем по целым словам: короткие слова — только точное совпадение,
+# длинные корни — по началу слова. Раньше проверялось «слово внутри текста»,
+# и «ит» банило за «цитология», «лейкоцит», «Литвицкий», а «бля» — за «бляшка».
+_MAT_EXACT = {
+    "бля", "блять", "блядь", "сука", "суки", "ит", "тварь", "мразь", "гнида", "нокта",
+    "шайтан", "еба", "залупа", "шлюха", "мудак", "ублюдок", "гондон", "пидор", "пидар",
+    "выблядок",
+}
+_MAT_PREFIX = (
+    "пизд", "ебан", "хуй", "хуе", "хуи", "нахуй", "ахуе", "охуе", "выеб",
+    "мудил", "ублюд", "шлюх", "бляд", "пидор", "пидар",
+)
+
+def find_profanity(text):
+    t = text.lower().replace("ё", "е")
+    words = re.findall(r"\w+", t)
+    for w in words:
+        if w in _MAT_EXACT or w.startswith(_MAT_PREFIX):
+            return w
+    if "сорай кет" in t:
+        return "сорай кет"
+    return None
+
+# Закладки — ожидание страницы от юзера
+# {user_id: {"book_name": ..., "book_url": ...}}
+_bookmark_state = {}
 
 # =========================
 # КЛАВИАТУРЫ
@@ -1154,13 +863,43 @@ def find_book(query):
     # Поиск теперь через books_db.json
     return None
 
+# Составные названия: ВСЕ основы должны встретиться в запросе (в любом порядке и падеже).
+# Ловят «патологическая физиология», «патологический физиология», «патологиялық анатомия» и т.п.
+SUBJECT_COMBOS = {
+    "patfiz":  [("патолог", "физиол"), ("пат", "физ")],
+    "patanat": [("патолог", "анатом"), ("пат", "анат")],
+    "toanat":  [("топограф", "анатом"), ("топ", "анат")],
+}
+
+def _norm_q(s):
+    s = s.lower().replace("ё", "е")
+    return re.sub(r"[^\w\s]", " ", s).strip()
+
 def find_subject(query):
-    q = query.lower().strip()
+    """Выбирает самое ТОЧНОЕ совпадение, а не первое.
+    Раньше «анат» (анатомия) находилось внутри «патанат» и «топанат»,
+    а «физ» (физиология) — внутри «патфиз», поэтому бот путал предметы."""
+    q = _norm_q(query)
+    if not q:
+        return None
+    best_code, best_score = None, 0
+
+    # 1. Прямые ключевые слова: чем длиннее совпадение, тем оно точнее
     for code, keywords in SUBJECT_KEYWORDS.items():
         for kw in keywords:
-            if kw in q:
-                return code
-    return None
+            kw = _norm_q(kw)
+            if kw and kw in q and len(kw) > best_score:
+                best_code, best_score = code, len(kw)
+
+    # 2. Составные названия — приоритетнее обычных ключевых слов
+    for code, combos in SUBJECT_COMBOS.items():
+        for stems in combos:
+            if all(re.search(r"(?<!\w)" + re.escape(st), q) for st in stems):
+                score = 100 + sum(len(st) for st in stems)
+                if score > best_score:
+                    best_code, best_score = code, score
+
+    return best_code
 
 
 # =========================
@@ -1239,8 +978,6 @@ def _word_score(qk, bk):
         return 0.95
     if len(qk) >= 4 and qk in bk:
         return 0.9
-    if qk[0] != bk[0]:      # опечатка в первой букве почти не бывает; без этого «Миндубаева» ≈ «Айтбаева»
-        return 0.0
     thr = 0.85 if len(qk) <= 4 else (0.75 if len(qk) <= 6 else 0.7)
     if abs(len(qk) - len(bk)) > max(len(qk), len(bk)) * (1 - thr):
         return 0.0
@@ -1820,17 +1557,12 @@ async def bookpage_handler(callback: types.CallbackQuery):
         )
     await callback.answer()
 
-def book_card_keyboard(subject_code, lang, idx, url, user_id=None):
+def book_card_keyboard(subject_code, lang, idx, url):
     likes, dislikes = get_votes(url)
-    _bk = BOOKS_DB.get(subject_code, {}).get(lang, [])
-    _ext = _bk[idx].get("ext_url") if idx < len(_bk) else None
-    if _ext and user_id is not None and feature_enabled("elib", user_id):
-        first_btn = InlineKeyboardButton(text="📖 Оқу / Читать онлайн", url=_ext)
-    else:
-        first_btn = InlineKeyboardButton(text="📥 Жүктеу / Скачать / Download", url=url)
     return InlineKeyboardMarkup(inline_keyboard=[
-        [first_btn],
+        [InlineKeyboardButton(text="📥 Жүктеу / Скачать / Download", url=url)],
         [InlineKeyboardButton(text="⭐ Таңдаулыға қосу", callback_data=f"fav_add_{subject_code}_{lang}_{idx}")],
+        [InlineKeyboardButton(text="📌 Закладка қосу / Добавить закладку", callback_data=f"bmark_start_{subject_code}_{lang}_{idx}")],
         [
             InlineKeyboardButton(text=f"👍 {likes}", callback_data=f"rate_up_{subject_code}_{lang}_{idx}"),
             InlineKeyboardButton(text=f"👎 {dislikes}", callback_data=f"rate_dn_{subject_code}_{lang}_{idx}"),
@@ -1862,21 +1594,10 @@ async def bookopen_handler(callback: types.CallbackQuery):
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📌 @library_adasan"
     )
-    keyboard = book_card_keyboard(subject_code, lang, idx, book["url"], callback.from_user.id)
+    keyboard = book_card_keyboard(subject_code, lang, idx, book["url"])
     sent = False
-    is_elib = bool(book.get("ext_url")) and feature_enabled("elib", callback.from_user.id)
-    if is_elib:
-        try:
-            await bot.send_message(
-                callback.message.chat.id,
-                link_book_text(book, subject_name, lang_name),
-                parse_mode="HTML", reply_markup=keyboard, disable_web_page_preview=True,
-            )
-            sent = True
-        except Exception as e:
-            logger.warning(f"Карточка электронной книги не отправилась: {e}")
-    cover_id = None if is_elib else book.get("photo_message_id")
-    if cover_id and feature_enabled("covers", callback.from_user.id):
+    cover_id = book.get("photo_message_id")
+    if cover_id:
         # Обложка берётся из канала (ничего не хранится в архиве бота)
         try:
             await bot.copy_message(
@@ -1926,7 +1647,42 @@ async def fav_add_handler(callback: types.CallbackQuery):
     else:
         await callback.answer("✅ Бұл кітап бұрын қосылған!", show_alert=True)
 
-@dp.callback_query(lambda c: c.data and c.data.startswith("fav_del_"))
+# =========================
+# CALLBACK — Закладка (начало)
+# =========================
+@dp.callback_query(lambda c: c.data and c.data.startswith("bmark_start_"))
+async def bmark_start_handler(callback: types.CallbackQuery):
+    parts = callback.data.replace("bmark_start_", "").split("_")
+    subject_code = parts[0]
+    lang = parts[1]
+    idx = int(parts[2])
+    book = BOOKS_DB.get(subject_code, {}).get(lang, [])[idx]
+    book_name = book["file_name"].replace(".pdf","").replace(".djvu","").replace("_"," ")[:50]
+    book_url = book["url"]
+    # Сохраняем состояние
+    _bookmark_state[callback.from_user.id] = {
+        "book_name": book_name,
+        "book_url": book_url,
+    }
+    await callback.answer()
+    await bot.send_message(
+        chat_id=callback.message.chat.id,
+        text=f"📌 <b>{book_name}</b>\n\n"
+             f"Бет нөмірін жазыңыз / Напишите номер страницы:\n\n"
+             f"Мысалы: <code>145</code>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Бас тарту / Отмена", callback_data="bmark_cancel")]
+        ])
+    )
+
+@dp.callback_query(lambda c: c.data == "bmark_cancel")
+async def bmark_cancel_handler(callback: types.CallbackQuery):
+    _bookmark_state.pop(callback.from_user.id, None)
+    await callback.message.delete()
+    await callback.answer("❌ Отменено")
+
+
 async def fav_del_handler(callback: types.CallbackQuery):
     url = callback.data.replace("fav_del_", "")
     remove_favorite(callback.from_user.id, url)
@@ -1959,6 +1715,29 @@ async def fav_del_handler(callback: types.CallbackQuery):
         pass
 
 # =========================
+# CALLBACK — Показать закладки
+# =========================
+@dp.callback_query(lambda c: c.data == "show_bookmarks")
+async def show_bookmarks_callback(callback: types.CallbackQuery):
+    bmarks = get_bookmarks(callback.from_user.id)
+    if not bmarks:
+        await callback.answer("📌 Закладок нет", show_alert=True)
+        return
+    text = "📌 Сіздің бетбелгілеріңіз / Ваши закладки:\n\n"
+    rows = []
+    for bm_id, bn, bu, page, note, created_at in bmarks:
+        date_str = created_at[:10] if created_at else ""
+        text += f"📖 {bn[:30]} — бет/стр. <b>{page}</b> ({date_str})\n"
+        rows.append([
+            InlineKeyboardButton(text=f"📖 {bn[:25]} стр.{page}", url=bu),
+            InlineKeyboardButton(text="🗑", callback_data=f"bmdel_{bm_id}"),
+        ])
+    rows.append([InlineKeyboardButton(text="🏠 Меню", callback_data="go_main_menu")])
+    await callback.message.answer(text, parse_mode="HTML",
+                                  reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+# =========================
 # КНОПКИ НИЖНЕЙ КЛАВИАТУРЫ
 # =========================
 @dp.message(lambda m: m.text and m.text.lower() == "📖 история")
@@ -1985,6 +1764,30 @@ async def history_button(message: types.Message):
         f"📖 Соңғы {len(history)} кітап / Последние {len(history)} книг:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
     )
+
+@dp.message(lambda m: m.text and m.text.lower() == "📌 закладки")
+async def bookmarks_button(message: types.Message):
+    bmarks = get_bookmarks(message.from_user.id)
+    if not bmarks:
+        await message.answer(
+            "📌 Закладок нет\n\nСохранить закладку:\n/bookmark 145 Синельников том 1",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🏠 Меню", callback_data="go_main_menu")]
+            ])
+        )
+        return
+    rows = []
+    text = f"📌 Сіздің бетбелгілеріңіз / Ваши закладки ({len(bmarks)}):\n\n"
+    for bm_id, bname, burl, page, note, created_at in bmarks:
+        date_str = created_at[:10] if created_at else ""
+        text += f"📖 {bname[:30]}\n📄 Бет: {page} | 📅 {date_str}\n\n"
+        rows.append([
+            InlineKeyboardButton(text=f"📖 {bname[:25]} — б.{page}", url=burl) if burl else
+            InlineKeyboardButton(text=f"📖 {bname[:25]} — б.{page}", callback_data="noop"),
+            InlineKeyboardButton(text="🗑", callback_data=f"bmdel_{bm_id}"),
+        ])
+    rows.append([InlineKeyboardButton(text="🏠 Меню", callback_data="go_main_menu")])
+    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 @dp.message(lambda m: m.text and m.text.lower() in SUBJECTS)
 async def open_subject(message: types.Message):
@@ -2137,48 +1940,6 @@ async def stats_command(message: types.Message):
     await message.answer(text)
 
 # =========================
-# КОМАНДЫ — поэтапный запуск функций (только админ)
-# =========================
-_STAGE_ICON  = {"off": "⛔", "admin": "🧪", "all": "✅"}
-_STAGE_LABEL = {"off": "выключена", "admin": "видит только админ", "all": "видят все"}
-
-@dp.message(Command("features"))
-async def features_command(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("❌ Рұқсат жоқ!")
-        return
-    lines = ["🚦 Новые функции:\n"]
-    for name, (desc, _default) in FEATURES.items():
-        st = feature_stage(name)
-        lines.append(f"{_STAGE_ICON[st]} {name} — {desc}\n    сейчас: {_STAGE_LABEL[st]}")
-    lines.append(
-        "\nИзменить стадию:\n"
-        "/feature <название> admin — проверяю только я\n"
-        "/feature <название> all — включить всем\n"
-        "/feature <название> off — выключить\n\n"
-        "Пример: /feature covers all"
-    )
-    await message.answer("\n".join(lines))
-
-@dp.message(Command("feature"))
-async def feature_command(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("❌ Рұқсат жоқ!")
-        return
-    parts = (message.text or "").split()
-    if len(parts) != 3 or parts[1] not in FEATURES or parts[2] not in FEATURE_STAGES:
-        names = ", ".join(FEATURES) or "—"
-        await message.answer(
-            "Использование: /feature <название> <admin|all|off>\n"
-            f"Доступные функции: {names}\n"
-            "Список со стадиями: /features"
-        )
-        return
-    name, stage = parts[1], parts[2]
-    set_feature_stage(name, stage)
-    await message.answer(f"{_STAGE_ICON[stage]} {name}: {_STAGE_LABEL[stage]}")
-
-# =========================
 # КОМАНДА — бан пользователя (только админ)
 # =========================
 @dp.message(Command("ban"))
@@ -2299,6 +2060,94 @@ async def unban_callback(callback: types.CallbackQuery):
     except Exception:
         pass
 
+# =========================
+# КОМАНДА — закладки
+# =========================
+@dp.message(Command("bookmark"))
+async def bookmark_command(message: types.Message):
+    """Использование: /bookmark <страница> [название книги]
+    Пример: /bookmark 145 Синельников том 1"""
+    parts = message.text.split(maxsplit=2)
+    if len(parts) < 2:
+        await message.answer(
+            "📌 Закладка / Бетбелгі\n\n"
+            "Использование:\n/bookmark <страница> [название книги]\n\n"
+            "Пример:\n/bookmark 145 Синельников том 1\n\n"
+            "Посмотреть закладки: /bookmarks"
+        )
+        return
+    try:
+        page = int(parts[1])
+    except ValueError:
+        await message.answer("❌ Страница должна быть числом!\nПример: /bookmark 145")
+        return
+    book_note = parts[2] if len(parts) > 2 else "Кітап / Книга"
+    add_bookmark(message.from_user.id, book_note, "", page, "")
+    await message.answer(
+        f"📌 Закладка сохранена!\n\n"
+        f"📖 Кітап: {book_note}\n"
+        f"📄 Бет / Страница: {page}"
+    )
+
+@dp.message(Command("bookmarks"))
+async def bookmarks_command(message: types.Message):
+    bmarks = get_bookmarks(message.from_user.id)
+    if not bmarks:
+        await message.answer(
+            "📌 Закладок нет\n\n"
+            "Сохранить закладку:\n/bookmark 145 Синельников том 1",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🏠 Меню", callback_data="go_main_menu")]
+            ])
+        )
+        return
+    rows = []
+    text = f"📌 Сіздің бетбелгілеріңіз / Ваши закладки ({len(bmarks)}):\n\n"
+    for bm_id, bname, burl, page, note, created_at in bmarks:
+        date_str = created_at[:10] if created_at else ""
+        text += f"📖 {bname[:30]}\n📄 Бет: {page} | 📅 {date_str}\n\n"
+        rows.append([
+            InlineKeyboardButton(text=f"📖 {bname[:25]} — б.{page}", url=burl) if burl else
+            InlineKeyboardButton(text=f"📖 {bname[:25]} — б.{page}", callback_data="noop"),
+            InlineKeyboardButton(text="🗑", callback_data=f"bmdel_{bm_id}"),
+        ])
+    rows.append([InlineKeyboardButton(text="🏠 Меню", callback_data="go_main_menu")])
+    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("bmdel_"))
+async def bookmark_delete_callback(callback: types.CallbackQuery):
+    bm_id = int(callback.data.replace("bmdel_", ""))
+    delete_bookmark(bm_id, callback.from_user.id)
+    await callback.answer("🗑 Өшірілді!", show_alert=True)
+    # Обновляем список
+    bmarks = get_bookmarks(callback.from_user.id)
+    if not bmarks:
+        try:
+            await callback.message.edit_text(
+                "📌 Закладок нет\n\nСохранить: /bookmark 145 Синельников том 1",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🏠 Меню", callback_data="go_main_menu")]
+                ])
+            )
+        except Exception:
+            pass
+        return
+    rows = []
+    text = f"📌 Закладки ({len(bmarks)}):\n\n"
+    for bm_id2, bname, burl, page, note, created_at in bmarks:
+        date_str = created_at[:10] if created_at else ""
+        text += f"📖 {bname[:30]}\n📄 Бет: {page} | 📅 {date_str}\n\n"
+        rows.append([
+            InlineKeyboardButton(text=f"📖 {bname[:25]} — б.{page}", url=burl) if burl else
+            InlineKeyboardButton(text=f"📖 {bname[:25]} — б.{page}", callback_data="noop"),
+            InlineKeyboardButton(text="🗑", callback_data=f"bmdel_{bm_id2}"),
+        ])
+    rows.append([InlineKeyboardButton(text="🏠 Меню", callback_data="go_main_menu")])
+    try:
+        await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    except Exception:
+        pass
+
 @dp.callback_query(lambda c: c.data == "noop")
 async def noop_callback(callback: types.CallbackQuery):
     await callback.answer()
@@ -2352,15 +2201,26 @@ async def update_books_command(message: types.Message):
         }
 
         def detect_subj(text):
-            tl = text.lower()
-            for tag, code in HASHTAG_MAP.items():
-                if tag in tl:
-                    return code
+            tl = text.lower().replace("ё", "е")
+            # хэштеги: самый длинный — самый точный (#патанат раньше #анат)
+            tag_hits = [(len(tag), code) for tag, code in HASHTAG_MAP.items() if tag in tl]
+            if tag_hits:
+                return max(tag_hits)[1]
+            # составные названия
+            if "патолог" in tl and "физиол" in tl:
+                return "patfiz"
+            if "патолог" in tl and "анатом" in tl:
+                return "patanat"
+            if "топограф" in tl and "анатом" in tl:
+                return "toanat"
+            # обычные ключевые слова: самое длинное совпадение
+            best, best_len = None, 0
             for subj, kws in SUBJECT_KW.items():
                 for kw in kws:
-                    if kw.lower() in tl:
-                        return subj
-            return "other"
+                    kw = kw.lower()
+                    if kw in tl and len(kw) > best_len:
+                        best, best_len = subj, len(kw)
+            return best or "other"
 
         def detect_lang(text):
             tl = text.lower()
@@ -2376,14 +2236,14 @@ async def update_books_command(message: types.Message):
                     return attr.file_name
             return "unknown"
 
-        result = {"new_db": {}, "total": 0, "covers": 0, "ext": 0, "error": None}
+        result = {"new_db": {}, "total": 0, "covers": 0, "error": None}
 
         async def collect():
             try:
                 new_db = {}
                 total = 0
-                timeline = []       # (id, это_фото, дата, id_альбома) — все посты канала
-                book_entries = []   # (запись_книги, id_поста, дата, id_альбома) — чтобы потом найти обложки
+                timeline = []       # (id, это_фото, дата) — все посты канала
+                book_entries = []   # (запись_книги, id_поста, дата) — чтобы потом найти обложки
                 session_path = os.path.join(BASE_DIR, "update_session")
                 async with TelegramClient(
                     session_path,
@@ -2393,30 +2253,7 @@ async def update_books_command(message: types.Message):
                     system_lang_code="ru-RU",
                 ) as client:
                     async for msg in client.iter_messages(CHANNEL, limit=5000):
-                        ext_url = None if isinstance(msg.media, MessageMediaDocument) else _extract_ext_book_url(msg)
-                        if ext_url:
-                            # Электронная книга (elib.kz): без файла, только текст и ссылка
-                            cap_clean = re.sub(r"https?://\S+", "", msg.raw_text or "").strip()
-                            first = next((l for l in cap_clean.splitlines() if l.strip()), "")
-                            title = re.sub(r"^[^\w]+", "", first).strip() or "Электронная книга"
-                            subj = detect_subj(title + " " + cap_clean)
-                            lang = detect_lang(title + " " + cap_clean)
-                            if any(ch in (title + cap_clean).lower() for ch in "ңғүұқәөһі"):
-                                lang = "kaz"
-                            if subj not in new_db:
-                                new_db[subj] = {"rus": [], "kaz": [], "eng": []}
-                            new_db[subj][lang].append({
-                                "message_id": msg.id,
-                                "file_name":  title[:120],
-                                "caption":    cap_clean[:300],
-                                "url":        f"https://t.me/library_adasan/{msg.id}",
-                                "ext_url":    ext_url,
-                            })
-                            timeline.append((msg.id, False, msg.date, msg.grouped_id))   # не «обложка» соседнего файла
-                            total += 1
-                            result["ext"] += 1
-                            continue
-                        timeline.append((msg.id, isinstance(msg.media, MessageMediaPhoto), msg.date, msg.grouped_id))
+                        timeline.append((msg.id, isinstance(msg.media, MessageMediaPhoto), msg.date))
                         if not (msg.media and isinstance(msg.media, MessageMediaDocument)):
                             continue
                         doc = msg.media.document
@@ -2440,25 +2277,19 @@ async def update_books_command(message: types.Message):
                             "url":        f"https://t.me/library_adasan/{msg.id}",
                         }
                         new_db[subj][lang].append(entry)
-                        book_entries.append((entry, msg.id, msg.date, msg.grouped_id))
+                        book_entries.append((entry, msg.id, msg.date))
                         total += 1
 
                 # Обложка = фото-пост, который стоит ПРЯМО перед файлом (не позже 10 минут).
-                # Если файл в альбоме (несколько файлов одной группой), то сначала идём назад
-                # до первого файла этого альбома — обложка стоит перед ним, и её получают все тома.
                 # У методичек, конспектов и силабусов фото нет — поле photo_message_id не создаётся.
                 timeline.sort(key=lambda t: t[0])
-                pos = {t[0]: i for i, t in enumerate(timeline)}
+                prev_of = {timeline[i][0]: timeline[i - 1] for i in range(1, len(timeline))}
                 covers = 0
-                for entry, mid, mdate, gid in book_entries:
-                    i = pos[mid]
-                    while gid and i > 0 and timeline[i - 1][3] == gid:
-                        i -= 1
-                    if i > 0:
-                        p = timeline[i - 1]
-                        if p[1] and abs((mdate - p[2]).total_seconds()) <= 3600:   # файлы могут грузиться долго
-                            entry["photo_message_id"] = p[0]
-                            covers += 1
+                for entry, mid, mdate in book_entries:
+                    p = prev_of.get(mid)
+                    if p and p[1] and abs((mdate - p[2]).total_seconds()) <= 600:
+                        entry["photo_message_id"] = p[0]
+                        covers += 1
                 result["covers"] = covers
                 result["new_db"] = new_db
                 result["total"]  = total
@@ -2487,6 +2318,7 @@ async def update_books_command(message: types.Message):
 
         new_db = result["new_db"]
         total  = result["total"]
+        apply_sort_overrides(new_db)   # ручная сортировка из /sort_other не сбрасывается
 
         db_path = os.path.join(BASE_DIR, "books_db.json")
         with open(db_path, "w", encoding="utf-8") as f:
@@ -2502,20 +2334,9 @@ async def update_books_command(message: types.Message):
         await message.answer(
             f"✅ Жаңартылды!\n\n"
             f"📖 Барлығы: {total} кітап\n"
-            f"🖼 Мұқабасы бар / С обложкой: {result['covers']}\n"
-            f"🔗 Электронных (elib.kz): {result['ext']}\n\n"
+            f"🖼 Мұқабасы бар / С обложкой: {result['covers']}\n\n"
             f"{stats_text}"
         )
-        # Хостинг (например, бесплатный Render) при перезапуске возвращает файлы к тем, что в проекте.
-        # Поэтому присылаем свежую базу — её нужно положить в проект вместо старого books_db.json.
-        try:
-            await message.answer_document(
-                FSInputFile(db_path),
-                caption="💾 Свежая books_db.json. Замени ею файл в проекте и задеплой — "
-                        "иначе после перезапуска хостинга новые книги и обложки пропадут."
-            )
-        except Exception as e:
-            logger.warning(f"Не удалось отправить books_db.json: {e}")
 
     except ImportError:
         await message.answer("❌ telethon орнатылмаған!\npip install telethon")
@@ -2558,6 +2379,170 @@ def save_books_db():
     with open(tmp, "w", encoding="utf-8") as f:
         _json.dump(BOOKS_DB, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
+
+# =========================
+# РАЗБОР РАЗДЕЛА "other" (/sort_other, только админ)
+# =========================
+# --- sort_other: logic ---
+_sort_overrides_path = os.path.join(BASE_DIR, "sort_overrides.json")
+_sort_skipped = set()   # message_id, пропущенные до перезапуска бота
+
+def _load_sort_overrides():
+    try:
+        with open(_sort_overrides_path, encoding="utf-8") as f:
+            return _json.load(f)
+    except Exception:
+        return {}
+
+def _save_sort_overrides(ov):
+    tmp = _sort_overrides_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        _json.dump(ov, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, _sort_overrides_path)
+
+def _pop_book(db, mid):
+    """Достаёт книгу из базы, где бы она ни лежала. Возвращает (язык, книга) или None."""
+    for sc, langs in db.items():
+        for lg, lst in langs.items():
+            for i, b in enumerate(lst):
+                if b.get("message_id") == mid:
+                    return lg, lst.pop(i)
+    return None
+
+def _put_book(db, code, lg, book):
+    tgt = db.setdefault(code, {}).setdefault(lg, [])
+    tgt.append(book)
+    tgt.sort(key=lambda x: x["message_id"], reverse=True)   # как и во всей базе: новые сверху
+
+def apply_sort_overrides(db):
+    """Применяет ручные решения админа к свежесобранной базе (вызывается из /update_books),
+    чтобы ручная сортировка не сбрасывалась при каждом обновлении."""
+    for mid, code in _load_sort_overrides().items():
+        if code == "other":
+            continue
+        found = _pop_book(db, int(mid))
+        if found:
+            _put_book(db, code, found[0], found[1])
+    return db
+
+def _sort_queue():
+    ov = _load_sort_overrides()
+    out = []
+    for lg in ("rus", "kaz", "eng"):
+        for b in BOOKS_DB.get("other", {}).get(lg, []):
+            mid = b["message_id"]
+            if str(mid) in ov or mid in _sort_skipped:
+                continue
+            out.append((lg, b))
+    return out
+
+def _sort_move(mid, code):
+    """Переносит книгу из other в предмет и запоминает решение."""
+    other = BOOKS_DB.get("other", {})
+    for lg, lst in other.items():
+        for i, b in enumerate(lst):
+            if b.get("message_id") == mid:
+                lst.pop(i)
+                _put_book(BOOKS_DB, code, lg, b)
+                save_books_db()
+                ov = _load_sort_overrides()
+                ov[str(mid)] = code
+                _save_sort_overrides(ov)
+                return True
+    return False
+# --- sort_other: handlers ---
+
+async def _sort_send_files():
+    """Хостинг при перезапуске откатывает файлы — присылаем админу свежие копии."""
+    for fn, cap in (
+        ("books_db.json", "💾 books_db.json — замени этим файлом старый в проекте"),
+        ("sort_overrides.json", "💾 sort_overrides.json — положи в проект рядом с books_db.json "
+                                "(иначе /update_books забудет ручную сортировку)"),
+    ):
+        path = os.path.join(BASE_DIR, fn)
+        if os.path.exists(path):
+            try:
+                await bot.send_document(ADMIN_ID, FSInputFile(path), caption=cap)
+            except Exception as e:
+                logger.warning(f"sort_other: не отправился {fn}: {e}")
+
+def _sort_card():
+    queue = _sort_queue()
+    if not queue:
+        return "✅ Разбор закончен — в other больше нет книг без решения.", None
+    lg, b = queue[0]
+    mid = b["message_id"]
+    caption = (b.get("caption") or "").strip().replace("\n", " ")[:200]
+    text = (
+        f"📦 <b>other</b> — осталось: {len(queue)}\n\n"
+        f"📄 <b>{_html.escape(b.get('file_name', '?'))}</b>\n"
+        f"🌐 {LANG_LABELS.get(lg, lg)}\n"
+        + (f"📝 {_html.escape(caption)}\n" if caption else "")
+        + f"🔗 {b.get('url', '')}\n\n"
+        "Куда отнести?"
+    )
+    rows, row = [], []
+    for label, code in SUBJECTS.items():
+        row.append(InlineKeyboardButton(text=label, callback_data=f"srt_{code}_{mid}"))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([
+        InlineKeyboardButton(text="⏭ Пропустить", callback_data=f"srt_skip_{mid}"),
+        InlineKeyboardButton(text="📦 Оставить в other", callback_data=f"srt_keep_{mid}"),
+    ])
+    rows.append([InlineKeyboardButton(text="💾 Прислать файлы", callback_data="srt_files_0")])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+@dp.message(Command("sort_other"))
+async def sort_other_command(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ Рұқсат жоқ!")
+        return
+    text, kb = _sort_card()
+    await message.answer(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("srt_"))
+async def sort_other_callback(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("❌ Рұқсат жоқ!", show_alert=True)
+        return
+    try:
+        _, code, mid_s = callback.data.split("_", 2)
+        mid = int(mid_s)
+    except ValueError:
+        await callback.answer("Қате / Ошибка данных")
+        return
+
+    if code == "files":
+        await callback.answer("💾 Отправляю файлы")
+        await _sort_send_files()
+        return
+    if code == "skip":
+        _sort_skipped.add(mid)
+        note = "⏭ Пропущено"
+    elif code == "keep":
+        ov = _load_sort_overrides()
+        ov[str(mid)] = "other"
+        _save_sort_overrides(ov)
+        note = "📦 Остаётся в other"
+    elif code in SUBJECTS.values():
+        note = f"✅ → {code}" if _sort_move(mid, code) else "⚠️ Книга уже перенесена"
+    else:
+        await callback.answer("Неизвестный предмет")
+        return
+
+    await callback.answer(note)
+    text, kb = _sort_card()
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb,
+                                         disable_web_page_preview=True)
+    except Exception:
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=kb,
+                                      disable_web_page_preview=True)
+    if kb is None:               # разбор закончен — сразу присылаем файлы
+        await _sort_send_files()
 
 # ---------- Популярное ----------
 async def send_popular(message: types.Message):
@@ -2603,7 +2588,7 @@ async def rate_handler(callback: types.CallbackQuery):
     result = set_vote(callback.from_user.id, book["url"], vote)
     try:
         await callback.message.edit_reply_markup(
-            reply_markup=book_card_keyboard(subject_code, lang, idx, book["url"], callback.from_user.id)
+            reply_markup=book_card_keyboard(subject_code, lang, idx, book["url"])
         )
     except Exception:
         pass
@@ -2861,22 +2846,10 @@ _group_chat_last = {}
 async def _send_book_to_group(message, sc, lang, idx, bk):
     """Копирует файл из канала в группу. Если не вышло — отправляет карточку со ссылкой."""
     url = bk.get("url", "")
-    if bk.get("ext_url") and message.from_user and feature_enabled("elib", message.from_user.id):
-        try:
-            await message.reply(
-                link_book_text(bk), parse_mode="HTML", disable_web_page_preview=True,
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="📖 Оқу / Читать онлайн", url=bk["ext_url"])]
-                ])
-            )
-            return True
-        except Exception as e:
-            logger.warning(f"Ответ в группу (электронная книга) не удался: {e}")
-            return False
     name = bk["file_name"].replace(".pdf", "").replace(".djvu", "").replace("_", " ")
     m = re.search(r"/(\d+)$", url)
     cover_id = bk.get("photo_message_id")
-    if m and cover_id and message.from_user and feature_enabled("covers", message.from_user.id):
+    if m and cover_id:
         try:
             await bot.copy_message(
                 chat_id=message.chat.id,
@@ -2961,6 +2934,28 @@ async def search(message: types.Message):
     text = message.text or ""
     user_id = message.from_user.id
 
+    # =============================
+    # ЗАКЛАДКА — ожидание страницы
+    # =============================
+    if user_id in _bookmark_state:
+        page_text = text.strip()
+        if page_text.isdigit():
+            state = _bookmark_state.pop(user_id)
+            add_bookmark(user_id, state["book_name"], state["book_url"], int(page_text))
+            await message.answer(
+                f"📌 Закладка сақталды / Закладка сохранена!\n\n"
+                f"📖 {state['book_name']}\n"
+                f"📄 Бет / Страница: <b>{page_text}</b>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="📌 Барлық закладкалар", callback_data="show_bookmarks")],
+                    [InlineKeyboardButton(text="🏠 Меню", callback_data="go_main_menu")],
+                ])
+            )
+        else:
+            await message.answer("⚠️ Тек сан жазыңыз / Напишите только число!\nМысалы: <code>145</code>", parse_mode="HTML")
+        return
+
     # Игнорируем неизвестные команды (начинаются с /)
     if text.startswith("/"):
         return
@@ -2972,7 +2967,7 @@ async def search(message: types.Message):
     now = datetime.now()
     if user_id not in spam_tracker:
         spam_tracker[user_id] = []
-    spam_tracker[user_id] = [t for t in spam_tracker[user_id] if (now - t).seconds < 10]
+    spam_tracker[user_id] = [t for t in spam_tracker[user_id] if (now - t).total_seconds() < 10]
     spam_tracker[user_id].append(now)
     if len(spam_tracker[user_id]) >= 7:
         ban_user(user_id, "Автобан: спам")
@@ -3003,7 +2998,8 @@ async def search(message: types.Message):
     # =============================
     # АВТОБАН ЗА МАТЫ
     # =============================
-    mat = find_profanity(text)
+    text_lower = text.lower()
+    mat = find_profanity(text) if user_id != ADMIN_ID else None
     if mat:
         ban_user(message.from_user.id, f"Автобан: мат ({mat})")
         spam_tracker.pop(message.from_user.id, None)
@@ -3052,37 +3048,23 @@ async def search(message: types.Message):
     # 3.1 Точного совпадения нет -> умный поиск (опечатки + латиница)
     is_fuzzy = False
     total_found = len(found_books)
-    v2 = feature_enabled("search_v2", user_id)
     if not found_books:
-        total_found, found_books = await asyncio.to_thread(fuzzy_find_books, text, 15 if v2 else 5)
+        total_found, found_books = await asyncio.to_thread(fuzzy_find_books, text, 5)
         is_fuzzy = bool(found_books)
-    elif v2:
-        # «неттер» нашёл русские книги — добавляем и английские (netter), и с опечатками
-        _, extra = await asyncio.to_thread(fuzzy_find_books, text, 20, 0.85)
-        seen = {(sc, lg, ix) for sc, lg, ix, _ in found_books}
-        for it in extra:
-            if (it[0], it[1], it[2]) not in seen:
-                found_books.append(it)
-                seen.add((it[0], it[1], it[2]))
-        total_found = len(found_books)
 
     if found_books:
-        if v2:
-            keyboard_rows, shown = build_result_rows(found_books[:20], max_rows=10)
-        else:
-            results = found_books[:5]
-            shown = len(results)
-            keyboard_rows = []
-            for sc, lang, idx, bk in results:
-                name = bk["file_name"].replace(".pdf","").replace(".djvu","").replace("_"," ")[:35]
-                lang_flag = {"rus": "🇷🇺", "kaz": "🇰🇿", "eng": "🇬🇧"}.get(lang, "")
-                keyboard_rows.append([InlineKeyboardButton(
-                    text=f"{lang_flag} {name}", callback_data=f"bk_{sc}_{lang}_{idx}"
-                )])
+        results = found_books[:5]
+        keyboard_rows = []
+        for sc, lang, idx, bk in results:
+            name = bk["file_name"].replace(".pdf","").replace(".djvu","").replace("_"," ")[:35]
+            lang_flag = {"rus": "🇷🇺", "kaz": "🇰🇿", "eng": "🇬🇧"}.get(lang, "")
+            keyboard_rows.append([InlineKeyboardButton(
+                text=f"{lang_flag} {name}", callback_data=f"bk_{sc}_{lang}_{idx}"
+            )])
         if is_fuzzy:
             head = "🔍 Дәл сәйкестік жоқ, мүмкін, мынаны іздедіңіз бе?\nТочного совпадения нет, возможно, вы искали:"
         else:
-            head = f"🔍 Табылды: {total_found} кітап (көрсетілген: {shown})"
+            head = f"🔍 Табылды: {total_found} кітап (көрсетілген: {len(results)})"
         await message.answer(
             f"{head}\n\n👇 Таңдаңыз:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
@@ -3118,6 +3100,8 @@ async def main():
         BotCommand(command="favorites", description="⭐ Таңдаулылар"),
         BotCommand(command="chanel",    description="📌 Канал"),
         BotCommand(command="history",    description="📖 История книг"),
+        BotCommand(command="bookmarks", description="📌 Закладки"),
+        BotCommand(command="bookmark",  description="📌 Сохранить закладку"),
         BotCommand(command="popular",   description="🔥 Популярное"),
         BotCommand(command="upload",    description="📤 Материал жіберу"),
     ], scope=BotCommandScopeDefault())
@@ -3132,6 +3116,7 @@ async def main():
         BotCommand(command="upload",       description="📤 Материал жіберу"),
         BotCommand(command="stats",        description="📊 Статистика"),
         BotCommand(command="update_books", description="🔄 Кітаптарды жаңарту"),
+        BotCommand(command="sort_other",   description="📦 Разобрать other"),
         BotCommand(command="broadcast",    description="📢 Рассылка"),
         BotCommand(command="ban",          description="🚫 Бан пользователя"),
         BotCommand(command="unban",        description="🔓 Разбан пользователя"),
