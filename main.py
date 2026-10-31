@@ -597,37 +597,43 @@ SUBJECT_NAMES = {
 }
 
 SUBJECT_PHOTOS = {
-    "gistologiya":    "gistologiya.jpg",
-    "anatomiya":      "anatomiya.jpg",
-    "biohimiya":      "biohimiya.jpg",
-    "fiziologiya":    "fiziologiya.jpg",
-    "ishki":          "ishki.jpg",
-    "patfiz":         "patfiz.jpg",
-    "patanat":        "patanat.jpg",
-    "toanat":         "toanat.jpg",
-    "farmakologiya":  "farmakologiya.jpg",
-    "mikrobiologiya": "mikrobiologiya.jpg",
-    "genetika":       "genetika.jpg",
-    "biofizika":      "biofizika.jpg",
-    "tarih":          "tarih.jpg",
-    "hirurgiya":      "hirurgiya.jpg",
+    "gistologiya":    "Гистология.jpg",
+    "anatomiya":      "анатомия.jpg",
+    "biohimiya":      "Биохимия.jpg",
+    "fiziologiya":    "Физиология.jpg",
+    "ishki":          "Пропедевтика.jpg",
+    "patfiz":         "Патфизиология.jpg",
+    "patanat":        "Патанатомия.jpg",
+    "toanat":         "Топанатомия.jpg",
+    "farmakologiya":  "Фармакология.jpg",
+    "mikrobiologiya": "Микробиология.jpg",
+    "genetika":       "Генетика.jpg",
+    "biofizika":      "Биофизика.jpg",
+    "tarih":          "Тарих.jpg",
+    "hirurgiya":      "Хирургия.jpg",
+    "stomatologiya":  "Стоматология.jpg",
+    "epidemiologiya": "Эпидемиология.jpg",
+    "immunologiya":   "Иммунология.jpg",
+    "radiologiya":    "Лучевая Диагностика.jpg",
+    "embriologiya":   "Эмбриология.jpg",
 }
 
 SUBJECT_KEYWORDS = {
     "gistologiya": ["гист","гиста","гисто","гистология","гистологию","hist","gist","gisto","гистол","цитология","эмбриология","цито","эмбрио"],
     "anatomiya":   ["анат","анато","анатомия","анатомию","anat","anatom","анатом"],
-    "biohimiya":   ["биох","биохим","биохимия","биохимию","биохи","biohim","biochem","биоким","биокимия"],
+    "biohimiya":   ["биох","биохим","биохимия","биохимию","биохи","биоким","биокимия","biohim","biochem","biochemistry","bkh","бхим","бх"],
     "fiziologiya": ["физ","физио","физиол","физиология","физиологию","fiziol","fizyo"],
-    "ishki":       ["ішкі","ішкі аурулар","ішкі ауру","ішкі аур","внутренние","ішкіаурулар","ishki","терапия","терап"],
+    "ishki":       ["ішкі","ішкі аурулар","ішкі ауру","ішкі аур","внутренние","внутренние болезни","внутренняя медицина","internal medicine","ішкіаурулар","ishki","терапия","терап","пропедевтика","пропедевт","пропед"],
     "patfiz":      ["патфиз","пат физ","патофизиология","патофизиол","patfiz","патфизиол"],
     "patanat":     ["патанат","пат анат","патологическая анатомия","патанатомия","patanat","патанатом"],
     "toanat":      ["топанат","топ анат","топографическая анатомия","топографич","toanat"],
-    "farmakologiya":  ["фармак","фарма","pharmac","farmak"],
+    "farmakologiya":  ["фармак","фарма","фармо","фармакология","фармакологию","фармако","pharmacology","pharmacological","pharmaco","pharmac","pharma","farmak"],
     "mikrobiologiya": ["микроб","microb","микробио"],
     "genetika":    ["генет","genet","генетика"],
     "biofizika":   ["биофиз","biofiz","биофизика"],
     "tarih":       ["тарих","tarih","история казах","қазақстан тарих"],
     "hirurgiya":   ["хирург","hirurg","жалпы хир"],
+    "stomatologiya": ["стоматология","стоматологию","стомат","стом","stomatology","dentistry"],
 }
 
 # =========================
@@ -846,7 +852,8 @@ def find_subject(query):
     for code, keywords in SUBJECT_KEYWORDS.items():
         for kw in keywords:
             kw = _norm_q(kw)
-            if kw and kw in q and len(kw) > best_score:
+            matched = (kw in q) if len(kw) >= 4 else bool(re.search(r"(?<!\w)" + re.escape(kw) + r"(?!\w)", q))
+            if kw and matched and len(kw) > best_score:
                 best_code, best_score = code, len(kw)
 
     # 2. Составные названия — приоритетнее обычных ключевых слов
@@ -1570,10 +1577,27 @@ async def bookopen_handler(callback: types.CallbackQuery):
         except Exception as e:
             logger.warning(f"Обложка не скопировалась (пост {cover_id}): {e}")
     if not sent:
-        # Нет обложки (методичка, конспект, силабус) — фото предмета из папки бота
-        photo_path = os.path.join(BASE_DIR, SUBJECT_PHOTOS.get(subject_code, "adasan.jpg"))
-        await bot.send_photo(chat_id=callback.message.chat.id,
-                             photo=FSInputFile(photo_path), caption=caption, reply_markup=keyboard)
+        # Не подменяем обложку книги логотипом предмета: показываем исходный пост с файлом.
+        try:
+            await bot.copy_message(
+                chat_id=callback.message.chat.id,
+                from_chat_id=f"@{CHANNEL.lstrip('@')}",
+                message_id=int(book["message_id"]),
+                caption=caption,
+                reply_markup=keyboard,
+            )
+            sent = True
+        except Exception as e:
+            logger.warning(f"Пост книги не скопировался ({book.get('message_id')}): {e}")
+    if not sent:
+        await bot.send_message(
+            chat_id=callback.message.chat.id,
+            text=caption,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📥 Жүктеу / Скачать", url=book["url"])],
+                [InlineKeyboardButton(text="⬅ Артқа / Назад / Back", callback_data=f"bl_{subject_code}_{lang}")],
+            ]),
+        )
     # Сохраняем в историю
     book_name_short = name[:50]
     add_book_history(callback.from_user.id, subject_code, lang, idx, book_name_short, book["url"])
@@ -1965,10 +1989,15 @@ async def update_books_command(message: types.Message):
 
         HASHTAG_MAP = {
             "#гистология": "gistologiya", "#анатомия": "anatomiya",
-            "#биохимия": "biohimiya", "#физиология": "fiziologiya",
+            "#биохимия": "biohimiya", "#биохим": "biohimiya", "#бхим": "biohimiya", "#бх": "biohimiya", "#bkh": "biohimiya",
+            "#физиология": "fiziologiya",
             "#ішкіаурулар": "ishki", "#ішкі": "ishki",
+            "#пропедевтика": "ishki", "#пропедевтики": "ishki", "#пропед": "ishki",
+            "#внутренниеболезни": "ishki", "#внутренние": "ishki",
             "#патфиз": "patfiz", "#патанат": "patanat",
             "#топанат": "toanat", "#фармакология": "farmakologiya",
+            "#фарма": "farmakologiya", "#фармо": "farmakologiya", "#фармако": "farmakologiya",
+            "#pharmacology": "farmakologiya", "#pharmaco": "farmakologiya", "#pharma": "farmakologiya",
             "#микробиология": "mikrobiologiya", "#хирургия": "hirurgiya",
             "#генетика": "genetika", "#биофизика": "biofizika",
             "#тарих": "tarih",
@@ -1976,13 +2005,13 @@ async def update_books_command(message: types.Message):
         SUBJECT_KW = {
             "anatomiya":      ["анатом","anatom","нетт","netter","синельник","сапин","билич","гайворон"],
             "gistologiya":    ["гистол","histol","цитол","эмбриол","ажаев","афанас","аяпов","тұңғыш"],
-            "biohimiya":      ["биохим","biochem","северин","harper"],
+            "biohimiya":      ["биохим","биохи","биоким","biochem","biochemistry","bkh","северин","harper"],
             "fiziologiya":    ["физиол","physiol","гайтон","судаков"],
-            "ishki":          ["ішкі","ishki","внутренн","терапи","пропедевт","неотложн"],
+            "ishki":          ["ішкі","ishki","внутренн","терапи","пропедевт","пропед","неотложн"],
             "patfiz":         ["патофиз","patofiz","патфиз"],
             "patanat":        ["патанат","патологич","роббинс","струков"],
             "toanat":         ["топограф","топка","оперативн"],
-            "farmakologiya":  ["фармакол","pharmacol","катцунг","харкевич"],
+            "farmakologiya":  ["фармакол","фарма","фармо","фармако","pharmacology","pharmaco","pharmac","pharma","катцунг","харкевич"],
             "hirurgiya":      ["хирург","hirurg"],
             "mikrobiologiya": ["микробиол","microbiol"],
             "genetika":       ["генет","genet"],
@@ -2014,7 +2043,12 @@ async def update_books_command(message: types.Message):
                     kw = kw.lower()
                     if kw in tl and len(kw) > best_len:
                         best, best_len = subj, len(kw)
-            return best or "other"
+            if best:
+                return best
+            # Последний общий разбор использует те же короткие/многоязычные синонимы,
+            # что и поиск предмета (например, «БХ», «Биохим», «pharma»).
+            alias_code = find_subject(text)
+            return alias_code if alias_code in SUBJECTS.values() else "other"
 
         def detect_lang(text):
             tl = text.lower()
@@ -2036,7 +2070,7 @@ async def update_books_command(message: types.Message):
             try:
                 new_db = {}
                 total = 0
-                timeline = []       # (id, это_фото, дата) — все посты канала
+                timeline = []       # (id, это_фото, это_документ, дата) — все посты канала
                 book_entries = []   # (запись_книги, id_поста, дата) — чтобы потом найти обложки
                 session_path = os.path.join(BASE_DIR, "update_session")
                 async with TelegramClient(
@@ -2047,7 +2081,11 @@ async def update_books_command(message: types.Message):
                     system_lang_code="ru-RU",
                 ) as client:
                     async for msg in client.iter_messages(CHANNEL, limit=5000):
-                        timeline.append((msg.id, isinstance(msg.media, MessageMediaPhoto), msg.date))
+                        is_document = bool(msg.media and isinstance(msg.media, MessageMediaDocument))
+                        is_photo = bool(msg.media and isinstance(msg.media, MessageMediaPhoto))
+                        if is_document and getattr(msg.media.document, "mime_type", "").startswith("image/"):
+                            is_photo, is_document = True, False
+                        timeline.append((msg.id, is_photo, is_document, msg.date))
                         if not (msg.media and isinstance(msg.media, MessageMediaDocument)):
                             continue
                         doc = msg.media.document
@@ -2074,16 +2112,27 @@ async def update_books_command(message: types.Message):
                         book_entries.append((entry, msg.id, msg.date))
                         total += 1
 
-                # Обложка = фото-пост, который стоит ПРЯМО перед файлом (не позже 10 минут).
-                # У методичек, конспектов и силабусов фото нет — поле photo_message_id не создаётся.
+                # Берём ближайший фото-пост перед файлом (до 10 минут), даже если
+                # между обложкой и PDF стоит короткое текстовое сообщение. Через другой
+                # документ обложку не переносим, чтобы не прикрепить чужое фото.
                 timeline.sort(key=lambda t: t[0])
-                prev_of = {timeline[i][0]: timeline[i - 1] for i in range(1, len(timeline))}
+                entries_by_id = {mid: (entry, mdate) for entry, mid, mdate in book_entries}
+                last_photo = None
+                last_document_id = 0
                 covers = 0
-                for entry, mid, mdate in book_entries:
-                    p = prev_of.get(mid)
-                    if p and p[1] and abs((mdate - p[2]).total_seconds()) <= 600:
-                        entry["photo_message_id"] = p[0]
-                        covers += 1
+                for mid, is_photo, is_document, mdate in timeline:
+                    if is_photo:
+                        last_photo = (mid, mdate)
+                    if not is_document:
+                        continue
+                    book_item = entries_by_id.get(mid)
+                    if book_item:
+                        entry, book_date = book_item
+                        if (last_photo and last_photo[0] > last_document_id and
+                                0 <= (book_date - last_photo[1]).total_seconds() <= 600):
+                            entry["photo_message_id"] = last_photo[0]
+                            covers += 1
+                    last_document_id = mid
                 result["covers"] = covers
                 result["new_db"] = new_db
                 result["total"]  = total
@@ -2112,7 +2161,8 @@ async def update_books_command(message: types.Message):
 
         new_db = result["new_db"]
         total  = result["total"]
-        inherit_series_covers(new_db)   # у 2-го, 3-го тома — обложка серии
+        normalize_existing_catalog(new_db)  # синонимы и тома одной серии без ручной сортировки
+        inherit_series_covers(new_db)   # у следующих томов — обложка серии
         build_dynamic_catalog(new_db)   # разделы из хэштегов (#пропедевтика и т.д.)
         apply_sort_overrides(new_db)   # ручная сортировка из /sort_other не сбрасывается
         _refresh_catalog_names(new_db)
@@ -2355,7 +2405,8 @@ _CAT_STOP = {
 _CAT_STATIC_STEMS = (
     "гист", "цитол", "эмбри", "анат", "биох", "бх", "физио", "физиол", "ішкі", "внутр",
     "патфиз", "патофиз", "патфизиол", "патан", "патолог", "топ", "операт", "хирург",
-    "фарма", "фармо", "микроб", "генет", "биофиз", "тарих",
+    "пропед", "биохим", "биохи", "биоким", "биох", "бхим", "бх", "bkh", "biochem", "biochemistry",
+    "фарма", "фармо", "pharma", "pharmac", "pharmaco", "микроб", "генет", "биофиз", "тарих",
 )
 # Книги без хэштега, которые определяем по названию (только из раздела other)
 _CAT_KEYWORDS = (
@@ -2389,6 +2440,9 @@ def _cat_is_static(tag):
 def _cat_book_tag(book, in_other):
     """Хэштег-кандидат для раздела каталога или None."""
     tags = _cat_tags(book)
+    # Варианты тегов стоматологии всегда создают один раздел и используют его обложку.
+    if any(t.startswith(("стом", "stom")) for t in tags):
+        return "стоматология"
     if any(_cat_is_static(t) for t in tags):
         return None                      # хэштег готового предмета — книгу не трогаем
     for t in tags:
@@ -2560,19 +2614,107 @@ async def catalog_open_callback(callback: types.CallbackQuery):
 # =========================
 # --- covers: logic ---
 _VOL_RE = re.compile(
-    r"(?<!\w)(?:часть|ч|том|т|бөлім|vol|volume|part|pt)\.?\s*\d+(?!\w)"          # «том 2», «т.2», «часть 3»
-    r"|(?<!\w)\d+\s*-?\s*(?:й|я|ый|ая|ой|ий)?\s*(?:том|часть|т|ч)(?!\w)\.?",       # «2 том», «2-й том»
+    r"(?<!\w)(?:часть|ч|том|т[oо]м|т|бөлім|t[oо]m|vol(?:ume)?|volume|part|pt)\.?\s*\d+(?!\w)"
+    r"|(?<!\w)\d+\s*-?\s*(?:й|я|ый|ая|ой|ий)?\s*(?:том|т[oо]м|часть|т|ч|t[oо]m|vol(?:ume)?|volume|part|pt)(?!\w)\.?",
+    re.I
+)
+_VOLUME_NUMBER_RE = re.compile(
+    r"(?<!\w)(?:часть|ч|том|т[oо]м|т|бөлім|t[oо]m|vol(?:ume)?|volume|part|pt)\.?\s*(\d+)(?!\w)"
+    r"|(?<!\w)(\d+)\s*-?\s*(?:й|я|ый|ая|ой|ий)?\s*(?:том|т[oо]м|часть|т|ч|t[oо]m|vol(?:ume)?|volume|part|pt)(?!\w)",
     re.I
 )
 
+_CONFUSABLE_LATIN = str.maketrans({"a":"а", "e":"е", "o":"о", "p":"р", "c":"с", "x":"х", "y":"у", "k":"к", "m":"м", "t":"т", "b":"в", "h":"н"})
+
 def _series_key(file_name):
-    """(название_без_номера_тома, есть_ли_номер_тома)"""
+    """Нормализует название серии и номер тома, включая латинские буквы-двойники."""
     t = (file_name or "").lower().replace("ё", "е")
     t = re.sub(r"\.(pdf|djvu|epub)$", "", t).replace("_", " ")
     has_vol = bool(_VOL_RE.search(t))
     t = _VOL_RE.sub(" ", t)
+    # Например, в «2 тoм» латинская o часто попадает вместо кириллической о.
+    if re.search(r"[а-яёәіңғүұқөһ]", t):
+        t = t.translate(_CONFUSABLE_LATIN)
+    has_vol = has_vol or bool(_VOL_RE.search(t))
+    t = _VOL_RE.sub(" ", t)
     t = re.sub(r"[^\w\s]", " ", t)
     return re.sub(r"\s+", " ", t).strip(), has_vol
+
+
+def _volume_number(file_name):
+    t = (file_name or "").lower()
+    t = re.sub(r"\.(pdf|djvu|epub)$", "", t)
+    match = _VOLUME_NUMBER_RE.search(t)
+    if not match and re.search(r"[а-яёәіңғүұқөһ]", t):
+        match = _VOLUME_NUMBER_RE.search(t.translate(_CONFUSABLE_LATIN))
+    if not match:
+        return None
+    try:
+        return int(match.group(1) or match.group(2))
+    except (TypeError, ValueError):
+        return None
+
+
+def normalize_existing_catalog(db):
+    """Автоматически объединяет распознанные варианты предметов и тома известных серий."""
+    overrides = _load_sort_overrides()
+    static_codes = set(SUBJECTS.values())
+    entries = []
+    for code, langs in db.items():
+        for lang, books in langs.items():
+            for book in books:
+                if str(book.get("message_id")) in overrides:
+                    continue
+                key, has_volume = _series_key(book.get("file_name", ""))
+                if has_volume and len(key) >= 5:
+                    entries.append((key, code, lang, book))
+
+    by_series = {}
+    for item in entries:
+        by_series.setdefault(item[0], []).append(item)
+
+    moves = []
+    for group in by_series.values():
+        known = {code for _, code, _, _ in group if code in static_codes}
+        if len(known) != 1:
+            continue
+        target = next(iter(known))
+        moves.extend((code, lang, book, target) for _, code, lang, book in group if code == "other")
+
+    # Уже имеющиеся неполные записи тоже раскладываются по тем же предметным синонимам,
+    # которыми пользуются поиск и /update_books. Стоматология остаётся отдельным динамическим разделом.
+    canonical_codes = static_codes | {"stomatologiya"}
+    queued = {(str(book.get("message_id")), target) for _, _, book, target in moves}
+    for source, langs in db.items():
+        if source != "other" and source in static_codes:
+            continue
+        for lang, books in langs.items():
+            for book in books:
+                mid = str(book.get("message_id"))
+                if mid in overrides or any(item[0] == mid for item in queued):
+                    continue
+                text = " ".join((source, book.get("subject_title", ""),
+                                 book.get("file_name", ""), book.get("caption", "")))
+                target = find_subject(text)
+                if target in canonical_codes and source != target:
+                    moves.append((source, lang, book, target))
+                    queued.add((mid, target))
+
+    changed = False
+    for source, lang, book, target in moves:
+        source_list = db.get(source, {}).get(lang, [])
+        try:
+            source_list.remove(book)
+        except ValueError:
+            continue
+        if target == "stomatologiya":
+            book["subject_title"] = "📖 Стоматология"
+        target_list = db.setdefault(target, {}).setdefault(lang, [])
+        if book not in target_list:
+            target_list.append(book)
+            target_list.sort(key=lambda item: item.get("message_id", 0), reverse=True)
+        changed = True
+    return changed
 
 def inherit_series_covers(db):
     """Если у тома нет своей обложки, а у другого тома этой же серии она есть — берём её.
@@ -2595,9 +2737,45 @@ def inherit_series_covers(db):
             best = min(cands, key=lambda d: abs(d["message_id"] - b["message_id"]))
             b["photo_message_id"] = best["photo_message_id"]
             n += 1
+
+    # В некоторых публикациях автор/название отсутствуют: файлы называются только
+    # «том 1», «том 2» и т.д. Объединяем короткие подряд идущие серии по номерам.
+    generic = []
+    for sc, langs in db.items():
+        for lg, lst in langs.items():
+            for b in lst:
+                key, has_vol = _series_key(b.get("file_name", ""))
+                number = _volume_number(b.get("file_name", ""))
+                if has_vol and not key and number is not None:
+                    generic.append((b.get("message_id", 0), number, b))
+    generic.sort(key=lambda x: x[0])
+    clusters = []
+    for item in generic:
+        if not clusters or item[0] - clusters[-1][-1][0] > 8:
+            clusters.append([item])
+        else:
+            clusters[-1].append(item)
+    for group in clusters:
+        numbers = [number for _, number, _ in group]
+        if len(group) < 3 or len(set(numbers)) != len(numbers) or max(numbers) - min(numbers) + 1 != len(numbers):
+            continue
+        photo_donors = [b for _, _, b in group if b.get("photo_message_id")]
+        if not photo_donors:
+            continue
+        for _, _, book in group:
+            if book.get("photo_message_id"):
+                continue
+            donor = min(photo_donors, key=lambda d: abs(d["message_id"] - book["message_id"]))
+            book["photo_message_id"] = donor["photo_message_id"]
+            n += 1
     return n
 # --- covers: handlers ---
-inherit_series_covers(BOOKS_DB)
+_catalog_migrated = normalize_existing_catalog(BOOKS_DB)
+_catalog_covers_added = inherit_series_covers(BOOKS_DB)
+if _catalog_migrated:
+    _refresh_catalog_names(BOOKS_DB)
+if _catalog_migrated or _catalog_covers_added:
+    save_books_db()
 
 # ---------- Закладки убраны: ответ на старые кнопки в чатах ----------
 @dp.message(lambda m: m.text and m.text.lower() == "📌 закладки")
