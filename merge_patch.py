@@ -4,7 +4,9 @@ merge_patch.py — добавляет в твой main.py:
   • исправление поиска предметов (патанат / топанат / патфиз),
   • безопасный автобан за мат, админа не баним,
   • /sort_other — разбор раздела other кнопками,
-  • /catalog — КАТАЛОГ: разделы создаются из хэштегов в постах (#пропедевтика, #стоматология …).
+  • /catalog — КАТАЛОГ: разделы создаются из хэштегов в постах (#пропедевтика, #стоматология …),
+  • обложки для 2-го, 3-го, 4-го томов (берутся от тома серии, у которого фото есть),
+  • УДАЛЕНИЕ функции закладок (кнопки, команды /bookmark и /bookmarks, обработчики).
 
 Как запустить: положи файл В ТУ ЖЕ ПАПКУ, где main.py, и выполни
     python merge_patch.py
@@ -30,12 +32,13 @@ NEW_DETECT = '        def detect_subj(text):\n            tl = text.lower().repl
 SORT_BLOCK = '# =========================\n# РАЗБОР РАЗДЕЛА "other" (/sort_other, только админ)\n# =========================\n# --- sort_other: logic ---\n_sort_overrides_path = os.path.join(BASE_DIR, "sort_overrides.json")\n_sort_skipped = set()   # message_id, пропущенные до перезапуска бота\n\ndef _load_sort_overrides():\n    try:\n        with open(_sort_overrides_path, encoding="utf-8") as f:\n            return _json.load(f)\n    except Exception:\n        return {}\n\ndef _save_sort_overrides(ov):\n    tmp = _sort_overrides_path + ".tmp"\n    with open(tmp, "w", encoding="utf-8") as f:\n        _json.dump(ov, f, ensure_ascii=False, indent=2)\n    os.replace(tmp, _sort_overrides_path)\n\ndef _pop_book(db, mid):\n    """Достаёт книгу из базы, где бы она ни лежала. Возвращает (язык, книга) или None."""\n    for sc, langs in db.items():\n        for lg, lst in langs.items():\n            for i, b in enumerate(lst):\n                if b.get("message_id") == mid:\n                    return lg, lst.pop(i)\n    return None\n\ndef _put_book(db, code, lg, book):\n    tgt = db.setdefault(code, {}).setdefault(lg, [])\n    tgt.append(book)\n    tgt.sort(key=lambda x: x["message_id"], reverse=True)   # как и во всей базе: новые сверху\n\ndef apply_sort_overrides(db):\n    """Применяет ручные решения админа к свежесобранной базе (вызывается из /update_books),\n    чтобы ручная сортировка не сбрасывалась при каждом обновлении."""\n    for mid, code in _load_sort_overrides().items():\n        if code == "other":\n            continue\n        found = _pop_book(db, int(mid))\n        if found:\n            _put_book(db, code, found[0], found[1])\n    return db\n\ndef _sort_queue():\n    ov = _load_sort_overrides()\n    out = []\n    for lg in ("rus", "kaz", "eng"):\n        for b in BOOKS_DB.get("other", {}).get(lg, []):\n            mid = b["message_id"]\n            if str(mid) in ov or mid in _sort_skipped:\n                continue\n            out.append((lg, b))\n    return out\n\ndef _sort_move(mid, code):\n    """Переносит книгу из other в предмет и запоминает решение."""\n    other = BOOKS_DB.get("other", {})\n    for lg, lst in other.items():\n        for i, b in enumerate(lst):\n            if b.get("message_id") == mid:\n                lst.pop(i)\n                _put_book(BOOKS_DB, code, lg, b)\n                save_books_db()\n                ov = _load_sort_overrides()\n                ov[str(mid)] = code\n                _save_sort_overrides(ov)\n                return True\n    return False\n# --- sort_other: handlers ---\n\nasync def _sort_send_files():\n    """Хостинг при перезапуске откатывает файлы — присылаем админу свежие копии."""\n    for fn, cap in (\n        ("books_db.json", "💾 books_db.json — замени этим файлом старый в проекте"),\n        ("sort_overrides.json", "💾 sort_overrides.json — положи в проект рядом с books_db.json "\n                                "(иначе /update_books забудет ручную сортировку)"),\n    ):\n        path = os.path.join(BASE_DIR, fn)\n        if os.path.exists(path):\n            try:\n                await bot.send_document(ADMIN_ID, FSInputFile(path), caption=cap)\n            except Exception as e:\n                logger.warning(f"sort_other: не отправился {fn}: {e}")\n\ndef _sort_card():\n    queue = _sort_queue()\n    if not queue:\n        return "✅ Разбор закончен — в other больше нет книг без решения.", None\n    lg, b = queue[0]\n    mid = b["message_id"]\n    caption = (b.get("caption") or "").strip().replace("\\n", " ")[:200]\n    text = (\n        f"📦 <b>other</b> — осталось: {len(queue)}\\n\\n"\n        f"📄 <b>{_html.escape(b.get(\'file_name\', \'?\'))}</b>\\n"\n        f"🌐 {LANG_LABELS.get(lg, lg)}\\n"\n        + (f"📝 {_html.escape(caption)}\\n" if caption else "")\n        + f"🔗 {b.get(\'url\', \'\')}\\n\\n"\n        "Куда отнести?"\n    )\n    rows, row = [], []\n    for label, code in SUBJECTS.items():\n        row.append(InlineKeyboardButton(text=label, callback_data=f"srt_{code}_{mid}"))\n        if len(row) == 2:\n            rows.append(row); row = []\n    if row:\n        rows.append(row)\n    rows.append([\n        InlineKeyboardButton(text="⏭ Пропустить", callback_data=f"srt_skip_{mid}"),\n        InlineKeyboardButton(text="📦 Оставить в other", callback_data=f"srt_keep_{mid}"),\n    ])\n    rows.append([InlineKeyboardButton(text="💾 Прислать файлы", callback_data="srt_files_0")])\n    return text, InlineKeyboardMarkup(inline_keyboard=rows)\n\n@dp.message(Command("sort_other"))\nasync def sort_other_command(message: types.Message):\n    if message.from_user.id != ADMIN_ID:\n        await message.answer("❌ Рұқсат жоқ!")\n        return\n    text, kb = _sort_card()\n    await message.answer(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)\n\n@dp.callback_query(lambda c: c.data and c.data.startswith("srt_"))\nasync def sort_other_callback(callback: types.CallbackQuery):\n    if callback.from_user.id != ADMIN_ID:\n        await callback.answer("❌ Рұқсат жоқ!", show_alert=True)\n        return\n    try:\n        _, code, mid_s = callback.data.split("_", 2)\n        mid = int(mid_s)\n    except ValueError:\n        await callback.answer("Қате / Ошибка данных")\n        return\n\n    if code == "files":\n        await callback.answer("💾 Отправляю файлы")\n        await _sort_send_files()\n        return\n    if code == "skip":\n        _sort_skipped.add(mid)\n        note = "⏭ Пропущено"\n    elif code == "keep":\n        ov = _load_sort_overrides()\n        ov[str(mid)] = "other"\n        _save_sort_overrides(ov)\n        note = "📦 Остаётся в other"\n    elif code in SUBJECTS.values():\n        note = f"✅ → {code}" if _sort_move(mid, code) else "⚠️ Книга уже перенесена"\n    else:\n        await callback.answer("Неизвестный предмет")\n        return\n\n    await callback.answer(note)\n    text, kb = _sort_card()\n    try:\n        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb,\n                                         disable_web_page_preview=True)\n    except Exception:\n        await callback.message.answer(text, parse_mode="HTML", reply_markup=kb,\n                                      disable_web_page_preview=True)\n    if kb is None:               # разбор закончен — сразу присылаем файлы\n        await _sort_send_files()\n\n'
 MAT_HELPER = '# Мат ищем по целым словам: короткие слова — только точное совпадение,\n# длинные корни — по началу слова. Раньше проверялось «слово внутри текста»,\n# и «ит» банило за «цитология», «лейкоцит», «Литвицкий», а «бля» — за «бляшка».\n_MAT_EXACT = {\n    "бля", "блять", "блядь", "сука", "суки", "ит", "тварь", "мразь", "гнида", "нокта",\n    "шайтан", "еба", "залупа", "шлюха", "мудак", "ублюдок", "гондон", "пидор", "пидар",\n    "выблядок",\n}\n_MAT_PREFIX = (\n    "пизд", "ебан", "хуй", "хуе", "хуи", "нахуй", "ахуе", "охуе", "выеб",\n    "мудил", "ублюд", "шлюх", "бляд", "пидор", "пидар",\n)\n\ndef find_profanity(text):\n    t = text.lower().replace("ё", "е")\n    words = re.findall(r"\\w+", t)\n    for w in words:\n        if w in _MAT_EXACT or w.startswith(_MAT_PREFIX):\n            return w\n    if "сорай кет" in t:\n        return "сорай кет"\n    return None\n\n'
 CATALOG_BLOCK = '# =========================\n# КАТАЛОГ ПО ХЭШТЕГАМ (/catalog) — разделы создаются из хэштегов в постах канала\n# =========================\n# --- catalog: logic ---\n# Хэштег, который НЕ является предметом (тип материала и т.п.)\n_CAT_STOP = {\n    "книга", "книги", "учебник", "методичка", "методички", "конспект", "конспекты", "шпаргалка",\n    "шпоры", "лекция", "лекции", "препараты", "сборник", "атлас", "adasan", "library_adasan",\n    "библиотека", "библотека", "pdf", "тест", "тесты",\n}\n# Хэштеги, которые уже относятся к 14 готовым предметам: такие книги каталог не трогает\n_CAT_STATIC_STEMS = (\n    "гист", "цитол", "эмбри", "анат", "биох", "бх", "физио", "физиол", "ішкі", "внутр",\n    "патфиз", "патофиз", "патфизиол", "патан", "патолог", "топ", "операт", "хирург",\n    "фарма", "фармо", "микроб", "генет", "биофиз", "тарих",\n)\n# Книги без хэштега, которые определяем по названию (только из раздела other)\n_CAT_KEYWORDS = (\n    ("пропед", "пропедевтика"), ("эпидем", "эпидемиология"), ("стомат", "стоматология"),\n    ("иммунол", "иммунология"), ("радиолог", "радиология"), ("лучев", "радиология"),\n)\nCATALOG_MIN_BOOKS = 1      # сколько книг нужно, чтобы создать раздел (поставь 2, чтобы убрать одиночки)\nCATALOG_TAKE_MIN = 3       # книги из ГОТОВЫХ предметов (не из other) переносим, только если в разделе от 3 книг\nCATALOG_SIM = 0.8          # насколько похожи хэштеги, чтобы считать их опечаткой одного раздела\n\n_DYN_NAMES = {}            # code -> «📖 Название» для разделов, созданных из хэштегов\n_CAT_TAG_RE = re.compile(r"#(\\w+)")\n_CAT_TR = dict(zip("абвгдезийклмнопрстуфхыэ", "abvgdezijklmnoprstufhye"))\n_CAT_TR.update({"ё": "e", "ж": "zh", "ц": "c", "ч": "ch", "ш": "sh", "щ": "sh", "ю": "yu", "я": "ya",\n                "ъ": "", "ь": "", "ә": "a", "і": "i", "ң": "n", "ғ": "g", "ү": "u", "ұ": "u",\n                "қ": "k", "ө": "o", "һ": "h"})\n\ndef _cat_norm(s):\n    return (s or "").lower().replace("ё", "е")\n\ndef _cat_slug(word):\n    s = "".join(_CAT_TR.get(ch, ch) for ch in _cat_norm(word))\n    return re.sub(r"[^a-z0-9]", "", s)[:20] or "razdel"\n\ndef _cat_tags(book):\n    return [_cat_norm(t) for t in _CAT_TAG_RE.findall(book.get("caption", "") or "")]\n\ndef _cat_is_static(tag):\n    return tag.startswith(_CAT_STATIC_STEMS)\n\ndef _cat_book_tag(book, in_other):\n    """Хэштег-кандидат для раздела каталога или None."""\n    tags = _cat_tags(book)\n    if any(_cat_is_static(t) for t in tags):\n        return None                      # хэштег готового предмета — книгу не трогаем\n    for t in tags:\n        if len(t) >= 4 and t not in _CAT_STOP:\n            return t\n    if in_other:                         # хэштега нет — пробуем по названию (только из other)\n        text = _cat_norm((book.get("file_name", "") or "") + " " + (book.get("caption", "") or ""))\n        for stem, name in _CAT_KEYWORDS:\n            if stem in text:\n                return name\n    return None\n\ndef _cat_similar(a, b):\n    from difflib import SequenceMatcher\n    return a[0] == b[0] and SequenceMatcher(None, a, b).ratio() >= CATALOG_SIM\n\ndef build_dynamic_catalog(db):\n    """Создаёт разделы из хэштегов (с учётом опечаток) и переносит туда книги.\n    Вызывается из /update_books. Возвращает {code: (название, число_книг)}."""\n    from collections import Counter\n    overrides = _load_sort_overrides()\n    cand = []                                            # (откуда_код, язык, книга, тег)\n    for sc, langs in db.items():\n        for lg, lst in langs.items():\n            for b in lst:\n                if overrides.get(str(b.get("message_id"))) == "other":\n                    continue                              # админ решил оставить в other\n                tag = _cat_book_tag(b, in_other=(sc == "other"))\n                if tag:\n                    cand.append((sc, lg, b, tag))\n    freq = Counter(t for _, _, _, t in cand)\n    heads, head_of = [], {}\n    for tag, _n in sorted(freq.items(), key=lambda kv: (-kv[1], kv[0])):\n        for h in heads:\n            if _cat_similar(tag, h):\n                head_of[tag] = h\n                break\n        else:\n            heads.append(tag)\n            head_of[tag] = tag\n    size_all = Counter(head_of[t] for _, _, _, t in cand)\n    # из готовых предметов (анатомия, внутренние…) берём книгу, только если раздел крупный\n    cand = [c for c in cand if c[0] == "other" or size_all[head_of[c[3]]] >= CATALOG_TAKE_MIN]\n    group_size = Counter(head_of[t] for _, _, _, t in cand)\n    used = set(SUBJECT_NAMES.keys()) - set(_DYN_NAMES.keys())\n    codes = {}\n    for h in heads:\n        if group_size[h] < CATALOG_MIN_BOOKS:\n            continue\n        code, n = _cat_slug(h), 2\n        while code in used:\n            code = f"{_cat_slug(h)[:17]}{n}"; n += 1\n        used.add(code); codes[h] = code\n    summary = {}\n    for sc, lg, b, tag in cand:\n        h = head_of[tag]\n        if h not in codes:\n            continue\n        code = codes[h]\n        for i, x in enumerate(db[sc][lg]):\n            if x is b:\n                db[sc][lg].pop(i)\n                break\n        title = "📖 " + h[:1].upper() + h[1:]\n        b["subject_title"] = title\n        db.setdefault(code, {}).setdefault(lg, []).append(b)\n        summary[code] = (title, summary.get(code, ("", 0))[1] + 1)\n    for code in codes.values():\n        for lg in db.get(code, {}):\n            db[code][lg].sort(key=lambda x: x["message_id"], reverse=True)\n    return summary\n\ndef _refresh_catalog_names(db):\n    """Названия разделов хранятся прямо в книгах (subject_title) — отдельного файла не нужно."""\n    for code in list(_DYN_NAMES):\n        SUBJECT_NAMES.pop(code, None)                   # убираем названия исчезнувших разделов\n    _DYN_NAMES.clear()\n    static_codes = set(SUBJECTS.values())\n    for code, langs in db.items():\n        if code == "other" or code in static_codes:\n            continue\n        for lst in langs.values():\n            for b in lst:\n                if b.get("subject_title"):\n                    _DYN_NAMES[code] = b["subject_title"]\n                    break\n            if code in _DYN_NAMES:\n                break\n    for code, name in _DYN_NAMES.items():\n        SUBJECT_NAMES[code] = name\n\ndef _catalog_extras():\n    out = []\n    for code in _DYN_NAMES:\n        n = sum(len(v) for v in BOOKS_DB.get(code, {}).values())\n        if n:\n            out.append((n, code))\n    out.sort(key=lambda t: (-t[0], t[1]))\n    return out[:40]\n# --- catalog: handlers ---\n_refresh_catalog_names(BOOKS_DB)\n\n_orig_send_subject_menu = send_subject_menu\nasync def send_subject_menu(chat_id, code):\n    """Раздел из хэштегов открывается сразу списком языков (без силлабусов и препаратов)."""\n    if code in _DYN_NAMES:\n        total = sum(len(v) for v in BOOKS_DB.get(code, {}).values())\n        await bot.send_message(\n            chat_id,\n            f"{_DYN_NAMES[code]}\\n\\n📖 Барлығы: {total} кітап\\n\\n"\n            "👇 Тілді таңдаңыз / Выберите язык / Choose language:",\n            reply_markup=lang_inline(code)\n        )\n        return\n    await _orig_send_subject_menu(chat_id, code)\n\n_orig_lang_inline = lang_inline\ndef lang_inline(subject_code):\n    kb = _orig_lang_inline(subject_code)\n    if subject_code not in _DYN_NAMES:\n        return kb\n    rows = []\n    for row in kb.inline_keyboard:                   # «Назад» ведёт в каталог, а не в меню предмета\n        rows.append([\n            InlineKeyboardButton(text=b.text, callback_data="catalog_open")\n            if b.callback_data == f"subject_{subject_code}" else b\n            for b in row\n        ])\n    return InlineKeyboardMarkup(inline_keyboard=rows)\n\ndef catalog_keyboard():\n    rows, row = [], []\n    for label, code in SUBJECTS.items():\n        row.append(InlineKeyboardButton(text=SUBJECT_NAMES.get(code, label), callback_data=f"subject_{code}"))\n        if len(row) == 2:\n            rows.append(row); row = []\n    if row:\n        rows.append(row)\n    row = []\n    for n, code in _catalog_extras():\n        row.append(InlineKeyboardButton(text=f"{_DYN_NAMES[code]} ({n})", callback_data=f"books_{code}"))\n        if len(row) == 2:\n            rows.append(row); row = []\n    if row:\n        rows.append(row)\n    rows.append([InlineKeyboardButton(text="🏠 Таңдаулар / Меню / Menu", callback_data="go_main_menu")])\n    return InlineKeyboardMarkup(inline_keyboard=rows)\n\nCATALOG_TEXT = "📋 Барлық пәндер / Все предметы / All subjects:\\n\\nПәнді таңдаңыз:"\n\nasync def send_catalog(message: types.Message):\n    await message.answer(CATALOG_TEXT, reply_markup=catalog_keyboard())\n\n@dp.message(Command("catalog"))\nasync def catalog_command(message: types.Message):\n    await send_catalog(message)\n\n@dp.callback_query(lambda c: c.data == "catalog_open")\nasync def catalog_open_callback(callback: types.CallbackQuery):\n    await bot.send_message(callback.message.chat.id, CATALOG_TEXT, reply_markup=catalog_keyboard())\n    try:\n        await callback.message.delete()\n    except Exception:\n        pass\n    await callback.answer()\n\n'
+COVERS_BLOCK = '# =========================\n# ОБЛОЖКИ ТОМОВ: у 2-го, 3-го, 4-го тома нет своего фото-поста — берём обложку серии\n# =========================\n# --- covers: logic ---\n_VOL_RE = re.compile(\n    r"(?<!\\w)(?:часть|ч|том|т|бөлім|vol|volume|part|pt)\\.?\\s*\\d+(?!\\w)"          # «том 2», «т.2», «часть 3»\n    r"|(?<!\\w)\\d+\\s*-?\\s*(?:й|я|ый|ая|ой|ий)?\\s*(?:том|часть|т|ч)(?!\\w)\\.?",       # «2 том», «2-й том»\n    re.I\n)\n\ndef _series_key(file_name):\n    """(название_без_номера_тома, есть_ли_номер_тома)"""\n    t = (file_name or "").lower().replace("ё", "е")\n    t = re.sub(r"\\.(pdf|djvu|epub)$", "", t).replace("_", " ")\n    has_vol = bool(_VOL_RE.search(t))\n    t = _VOL_RE.sub(" ", t)\n    t = re.sub(r"[^\\w\\s]", " ", t)\n    return re.sub(r"\\s+", " ", t).strip(), has_vol\n\ndef inherit_series_covers(db):\n    """Если у тома нет своей обложки, а у другого тома этой же серии она есть — берём её.\n    Ищем по ВСЕМ предметам (1-й том может лежать в другом разделе). Возвращает число книг с новой обложкой."""\n    donors, needy = {}, []\n    for sc, langs in db.items():\n        for lg, lst in langs.items():\n            for b in lst:\n                key, has_vol = _series_key(b.get("file_name", ""))\n                if len(key) < 6:\n                    continue\n                if b.get("photo_message_id"):\n                    donors.setdefault(key, []).append(b)\n                elif has_vol:\n                    needy.append((key, b))\n    n = 0\n    for key, b in needy:\n        cands = donors.get(key)\n        if cands:\n            best = min(cands, key=lambda d: abs(d["message_id"] - b["message_id"]))\n            b["photo_message_id"] = best["photo_message_id"]\n            n += 1\n    return n\n# --- covers: handlers ---\ninherit_series_covers(BOOKS_DB)\n\n'
 FIND_TAIL_OLD = '    return best_code\n'
 FIND_TAIL_NEW = '    if best_code is None:          # раздел из хэштегов: «стоматология», «пропедевтика»…\n        for code, title in _DYN_NAMES.items():\n            t = _norm_q(title)\n            if len(q) >= 4 and (q in t or t in q):\n                return code\n    return best_code\n'
 
 POPULAR = "# ---------- Популярное ----------"
 OLD_MAT_LOOP = "    for mat in MAT_WORDS:\n        if mat in text_lower:\n"
-MAT_ANCHOR = "# Закладки — ожидание страницы от юзера"
+MAT_ANCHOR = "# =========================\n# КЛАВИАТУРЫ\n"
 OVR_LINE = "        apply_sort_overrides(new_db)   # ручная сортировка из /sort_other не сбрасывается\n"
 
 class Fail(Exception):
@@ -97,16 +100,115 @@ def apply_catalog(s):
                '        BotCommand(command="catalog",      description="📋 Каталог / Все предметы"),\n',
                "команда /catalog для админа")
 
+def apply_covers(s):
+    s = rep(s, POPULAR, COVERS_BLOCK + POPULAR, "обложки томов: у 2-го, 3-го, 4-го тома берём обложку серии")
+    return rep(s, '        new_db = result["new_db"]\n        total  = result["total"]\n',
+               '        new_db = result["new_db"]\n        total  = result["total"]\n'
+               '        inherit_series_covers(new_db)   # у 2-го, 3-го тома — обложка серии\n',
+               "/update_books тоже подставляет обложки томов")
+
+LEGACY_BLOCK = """# ---------- Закладки убраны: ответ на старые кнопки в чатах ----------
+@dp.message(lambda m: m.text and m.text.lower() == "📌 закладки")
+async def legacy_bookmark_message(message: types.Message):
+    # у части пользователей ещё висит старая клавиатура — обновляем её на новую
+    await message.answer("📌 Закладки убрали. Меню обновлено 👇", reply_markup=main_menu)
+
+@dp.callback_query(lambda c: c.data and c.data.startswith(("bmark_", "bmdel_", "show_bookmarks")))
+async def legacy_bookmark_callback(callback: types.CallbackQuery):
+    await callback.answer("📌 Закладки убрали / Функция закладок удалена", show_alert=True)
+
+"""
+BM_FUNCS = {"add_bookmark", "get_bookmarks", "delete_bookmark", "bmark_start_handler", "bmark_cancel_handler",
+            "show_bookmarks_callback", "bookmarks_button", "bookmark_command", "bookmarks_command",
+            "bookmark_delete_callback"}
+BM_MARKERS = ("def add_bookmark(", "_bookmark_state", "CREATE TABLE IF NOT EXISTS bookmarks",
+              'callback_data=f"bmark_start_', 'KeyboardButton(text="📌 Закладки")', 'BotCommand(command="bookmark')
+
+def remove_bookmarks(s):
+    import ast, re
+    done = []
+    # 1) целые функции (вместе с декоратором и рамкой-заголовком над ними)
+    lines = s.split("\n")
+    kill = set()
+    for node in ast.parse(s).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in BM_FUNCS:
+            start = min([d.lineno for d in node.decorator_list] + [node.lineno]) - 1
+            if (start >= 3 and lines[start - 1].startswith("# ===") and lines[start - 3].startswith("# ===")
+                    and re.search("закладк", lines[start - 2], re.I)):
+                start -= 3
+            kill.update(range(start, node.end_lineno))
+            done.append(node.name)
+    lines = [l for i, l in enumerate(lines) if i not in kill]
+    s = "\n".join(lines)
+    if done:
+        print(f"  ✓ закладки: удалено функций — {len(done)}")
+
+    def cut(pattern, label, flags=re.S):
+        nonlocal s
+        s2, n = re.subn(pattern, "", s, flags=flags)
+        if n:
+            s = s2
+            print(f"  ✓ закладки: {label}")
+    cut(r'    # Закладки в книгах\n    c\.execute\("""CREATE TABLE IF NOT EXISTS bookmarks \(.*?\n    \)"""\)\n',
+        "таблица больше не создаётся (старые данные в adasan.db не трогаю)")
+    cut(r'(?:# [^\n]*\n)*_bookmark_state = \{\}\n', "служебная переменная")
+    cut(r'[ ]*\[InlineKeyboardButton\(text="📌 Закладка қосу / Добавить закладку", callback_data=f"bmark_start_[^\n]*\n',
+        "кнопка «Добавить закладку» в карточке книги")
+    cut(r'[ ]*BotCommand\(command="bookmarks?",[^\n]*\n', "команды /bookmark и /bookmarks из меню")
+    # ожидание номера страницы внутри search()
+    lines = s.split("\n")
+    for i, l in enumerate(lines):
+        if l == "    if user_id in _bookmark_state:":
+            a = i
+            if (a >= 3 and lines[a - 1].strip().startswith("# ====") and "ЗАКЛАДК" in lines[a - 2].upper()
+                    and lines[a - 3].strip().startswith("# ====")):
+                a -= 3
+            b = i + 1
+            while b < len(lines) and (lines[b].strip() == "" or lines[b].startswith("     ")):
+                b += 1
+            del lines[a:b]
+            s = "\n".join(lines)
+            print("  ✓ закладки: ожидание номера страницы в поиске")
+            break
+    # кнопка в нижнем меню
+    pair = ('        [KeyboardButton(text="📖 История"), KeyboardButton(text="📌 Закладки")],\n'
+            '        [KeyboardButton(text="🔥 Популярное"), KeyboardButton(text="📤 Материал жіберу")],\n')
+    if pair in s:
+        s = s.replace(pair, '        [KeyboardButton(text="📖 История"), KeyboardButton(text="🔥 Популярное")],\n'
+                            '        [KeyboardButton(text="📤 Материал жіберу")],\n', 1)
+        print("  ✓ закладки: кнопка «📌 Закладки» убрана из нижнего меню")
+    else:
+        s2, n = re.subn(r',\s*KeyboardButton\(text="📌 Закладки"\)', "", s)
+        if n:
+            s = s2
+            print("  ✓ закладки: кнопка «📌 Закладки» убрана из нижнего меню")
+    s = re.sub(r"\n{4,}", "\n\n\n", s)
+    # страховка: не должно остаться НИ ОДНОЙ ссылки на удалённое, иначе бот упал бы при запуске/нажатии
+    left = re.findall(r"_bookmark_state|\badd_bookmark\b|\bget_bookmarks\b|\bdelete_bookmark\b|show_bookmarks|bmdel_|bmark_",
+                      s)
+    if left:
+        raise Fail("после удаления закладок остались ссылки на них: " + ", ".join(sorted(set(left))))
+    if "def legacy_bookmark_message" not in s:
+        s = rep(s, POPULAR, LEGACY_BLOCK + POPULAR, "ответ на старые кнопки закладок (у пользователей ещё висят в чатах)")
+    return s
+
+
 need_sort = "def sort_other_command" not in src
 need_cat = "def build_dynamic_catalog" not in src
-if not (need_sort or need_cat):
-    sys.exit("Всё уже установлено (найдены /sort_other и /catalog). Ничего не меняю.")
+need_cov = "def inherit_series_covers" not in src
+need_bm = any(m in src for m in BM_MARKERS)
+if not (need_sort or need_cat or need_cov or need_bm):
+    sys.exit("Всё уже установлено (сортировка, каталог, обложки томов; закладки удалены). Ничего не меняю.")
 
 try:
     if need_sort:
         src = apply_sort_fixes(src)
     if need_cat:
         src = apply_catalog(src)
+    if need_cov:
+        src = apply_covers(src)
+    if any(m in src for m in BM_MARKERS):
+        src = remove_bookmarks(src)
 except Fail as e:
     print("Файл НЕ изменён.\n  ✗", e)
     print("Пришли main.py файлом — я посмотрю, что отличается.")
@@ -128,4 +230,5 @@ with open(path, "w", encoding="utf-8", newline="") as f:
 os.unlink(tmp.name)
 print(f"\nГотово. Копия старого файла: {backup}")
 print("1) Перезапусти бота.  2) Отправь ему /update_books — каталог построится из хэштегов.")
-print("3) Откроешь его командой /catalog или кнопкой «📋 Барлық пәндер».")
+print("3) Каталог: команда /catalog или кнопка «📋 Барлық пәндер».")
+print("Обложки томов заработают сразу после перезапуска, сканировать канал для этого не нужно.")
