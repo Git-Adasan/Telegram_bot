@@ -1563,12 +1563,14 @@ async def bookopen_handler(callback: types.CallbackQuery):
     keyboard = book_card_keyboard(subject_code, lang, idx, book["url"])
     sent = False
     cover_id = book.get("photo_message_id")
+    source_chat = f"@{CHANNEL.lstrip('@')}"
     if cover_id:
-        # Обложка берётся из канала (ничего не хранится в архиве бота)
+        # Сначала копируем обложку с карточкой. Если Telegram не разрешит копирование,
+        # пробуем переслать исходное фото отдельным сообщением.
         try:
             await bot.copy_message(
                 chat_id=callback.message.chat.id,
-                from_chat_id=f"@{CHANNEL.lstrip('@')}",
+                from_chat_id=source_chat,
                 message_id=int(cover_id),
                 caption=caption,
                 reply_markup=keyboard,
@@ -1576,12 +1578,37 @@ async def bookopen_handler(callback: types.CallbackQuery):
             sent = True
         except Exception as e:
             logger.warning(f"Обложка не скопировалась (пост {cover_id}): {e}")
+            try:
+                await bot.forward_message(
+                    chat_id=callback.message.chat.id,
+                    from_chat_id=source_chat,
+                    message_id=int(cover_id),
+                )
+                await bot.send_message(
+                    chat_id=callback.message.chat.id,
+                    text=caption,
+                    reply_markup=keyboard,
+                )
+                sent = True
+            except Exception as forward_error:
+                logger.warning(f"Обложка не переслалась (пост {cover_id}): {forward_error}")
     if not sent:
-        # Не подменяем обложку книги логотипом предмета: показываем исходный пост с файлом.
+        # Если фото книги недоступно, показываем иллюстрацию её предмета, а не PDF вместо фото.
+        photo_file = SUBJECT_PHOTOS.get(subject_code, "adasan.jpg")
+        photo_path = os.path.join(BASE_DIR, photo_file)
+        if os.path.isfile(photo_path):
+            await bot.send_photo(
+                chat_id=callback.message.chat.id,
+                photo=FSInputFile(photo_path),
+                caption=caption,
+                reply_markup=keyboard,
+            )
+            sent = True
+    if not sent:
         try:
             await bot.copy_message(
                 chat_id=callback.message.chat.id,
-                from_chat_id=f"@{CHANNEL.lstrip('@')}",
+                from_chat_id=source_chat,
                 message_id=int(book["message_id"]),
                 caption=caption,
                 reply_markup=keyboard,
