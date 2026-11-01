@@ -1593,18 +1593,8 @@ async def bookopen_handler(callback: types.CallbackQuery):
             except Exception as forward_error:
                 logger.warning(f"Обложка не переслалась (пост {cover_id}): {forward_error}")
     if not sent:
-        # Если фото книги недоступно, показываем иллюстрацию её предмета, а не PDF вместо фото.
-        photo_file = SUBJECT_PHOTOS.get(subject_code, "adasan.jpg")
-        photo_path = os.path.join(BASE_DIR, photo_file)
-        if os.path.isfile(photo_path):
-            await bot.send_photo(
-                chat_id=callback.message.chat.id,
-                photo=FSInputFile(photo_path),
-                caption=caption,
-                reply_markup=keyboard,
-            )
-            sent = True
-    if not sent:
+        # Не показываем тематическую иллюстрацию как будто это обложка книги.
+        # Если настоящий снимок недоступен, отправляем исходный пост с книгой.
         try:
             await bot.copy_message(
                 chat_id=callback.message.chat.id,
@@ -2016,7 +2006,8 @@ async def update_books_command(message: types.Message):
 
         HASHTAG_MAP = {
             "#гистология": "gistologiya", "#анатомия": "anatomiya",
-            "#биохимия": "biohimiya", "#биохим": "biohimiya", "#бхим": "biohimiya", "#бх": "biohimiya", "#bkh": "biohimiya",
+            "#анат": "anatomiya", "#anat": "anatomiya", "#anatom": "anatomiya", "#anatomy": "anatomiya",
+            "#биохимия": "biohimiya", "#биохим": "biohimiya", "#биох": "biohimiya", "#бхим": "biohimiya", "#бх": "biohimiya", "#bkh": "biohimiya", "#biochem": "biohimiya", "#biochemistry": "biohimiya",
             "#физиология": "fiziologiya",
             "#ішкіаурулар": "ishki", "#ішкі": "ishki",
             "#пропедевтика": "ishki", "#пропедевтики": "ishki", "#пропед": "ishki",
@@ -2052,10 +2043,21 @@ async def update_books_command(message: types.Message):
 
         def detect_subj(text):
             tl = text.lower().replace("ё", "е")
-            # хэштеги: самый длинный — самый точный (#патанат раньше #анат)
-            tag_hits = [(len(tag), code) for tag, code in HASHTAG_MAP.items() if tag in tl]
-            if tag_hits:
-                return max(tag_hits)[1]
+            # Проверяем каждый реальный хэштег отдельно и сначала сводим алиасы к предмету.
+            # Например, #анат и #анатомия дают один код, а #патанат не путается с #анат.
+            tag_tokens = ["#" + tag for tag in re.findall(r"(?<!\w)#(\w+)", tl)]
+            tag_codes = list(dict.fromkeys(HASHTAG_MAP[tag] for tag in tag_tokens if tag in HASHTAG_MAP))
+            if len(tag_codes) == 1:
+                return tag_codes[0]
+            if len(tag_codes) > 1:
+                text_without_tags = re.sub(r"#\w+", " ", tl)
+                best_tag_code, best_tag_len = None, 0
+                for subj, kws in SUBJECT_KW.items():
+                    for kw in kws:
+                        kw = kw.lower()
+                        if kw in text_without_tags and len(kw) > best_tag_len:
+                            best_tag_code, best_tag_len = subj, len(kw)
+                return best_tag_code or tag_codes[0]
             # составные названия
             if "патолог" in tl and "физиол" in tl:
                 return "patfiz"
@@ -2097,8 +2099,8 @@ async def update_books_command(message: types.Message):
             try:
                 new_db = {}
                 total = 0
-                timeline = []       # (id, это_фото, это_документ, дата) — все посты канала
-                book_entries = []   # (запись_книги, id_поста, дата) — чтобы потом найти обложки
+                timeline = []       # (id, фото, документ, дата, id_альбома) — посты канала
+                book_entries = []   # (запись_книги, id_поста, дата, id_альбома)
                 session_path = os.path.join(BASE_DIR, "update_session")
                 async with TelegramClient(
                     session_path,
@@ -2112,7 +2114,8 @@ async def update_books_command(message: types.Message):
                         is_photo = bool(msg.media and isinstance(msg.media, MessageMediaPhoto))
                         if is_document and getattr(msg.media.document, "mime_type", "").startswith("image/"):
                             is_photo, is_document = True, False
-                        timeline.append((msg.id, is_photo, is_document, msg.date))
+                        grouped_id = getattr(msg, "grouped_id", None)
+                        timeline.append((msg.id, is_photo, is_document, msg.date, grouped_id))
                         if not (msg.media and isinstance(msg.media, MessageMediaDocument)):
                             continue
                         doc = msg.media.document
@@ -2136,26 +2139,37 @@ async def update_books_command(message: types.Message):
                             "url":        f"https://t.me/library_adasan/{msg.id}",
                         }
                         new_db[subj][lang].append(entry)
-                        book_entries.append((entry, msg.id, msg.date))
+                        book_entries.append((entry, msg.id, msg.date, grouped_id))
                         total += 1
 
                 # Берём ближайший фото-пост перед файлом (до 10 минут), даже если
                 # между обложкой и PDF стоит короткое текстовое сообщение. Через другой
                 # документ обложку не переносим, чтобы не прикрепить чужое фото.
                 timeline.sort(key=lambda t: t[0])
-                entries_by_id = {mid: (entry, mdate) for entry, mid, mdate in book_entries}
+                entries_by_id = {mid: (entry, mdate, grouped_id)
+                                 for entry, mid, mdate, grouped_id in book_entries}
+                album_photo = {}
+                for mid, is_photo, _is_document, _mdate, grouped_id in timeline:
+                    if is_photo and grouped_id:
+                        album_photo.setdefault(grouped_id, mid)
+                covers = 0
+                for entry, _mid, _mdate, grouped_id in book_entries:
+                    if grouped_id and grouped_id in album_photo:
+                        entry["photo_message_id"] = album_photo[grouped_id]
+                        covers += 1
+
                 last_photo = None
                 last_document_id = 0
-                covers = 0
-                for mid, is_photo, is_document, mdate in timeline:
+                for mid, is_photo, is_document, mdate, _grouped_id in timeline:
                     if is_photo:
                         last_photo = (mid, mdate)
                     if not is_document:
                         continue
                     book_item = entries_by_id.get(mid)
                     if book_item:
-                        entry, book_date = book_item
-                        if (last_photo and last_photo[0] > last_document_id and
+                        entry, book_date, _book_group = book_item
+                        if (not entry.get("photo_message_id") and last_photo and
+                                last_photo[0] > last_document_id and
                                 0 <= (book_date - last_photo[1]).total_seconds() <= 600):
                             entry["photo_message_id"] = last_photo[0]
                             covers += 1
@@ -2430,7 +2444,7 @@ _CAT_STOP = {
 }
 # Хэштеги, которые уже относятся к 14 готовым предметам: такие книги каталог не трогает
 _CAT_STATIC_STEMS = (
-    "гист", "цитол", "эмбри", "анат", "биох", "бх", "физио", "физиол", "ішкі", "внутр",
+    "гист", "цитол", "эмбри", "анат", "anat", "anatom", "biochem", "биох", "бх", "физио", "физиол", "ішкі", "внутр",
     "патфиз", "патофиз", "патфизиол", "патан", "патолог", "топ", "операт", "хирург",
     "пропед", "биохим", "биохи", "биоким", "биох", "бхим", "бх", "bkh", "biochem", "biochemistry",
     "фарма", "фармо", "pharma", "pharmac", "pharmaco", "микроб", "генет", "биофиз", "тарих",
@@ -2642,12 +2656,14 @@ async def catalog_open_callback(callback: types.CallbackQuery):
 # --- covers: logic ---
 _VOL_RE = re.compile(
     r"(?<!\w)(?:часть|ч|том|т[oо]м|т|бөлім|t[oо]m|vol(?:ume)?|volume|part|pt)\.?\s*\d+(?!\w)"
-    r"|(?<!\w)\d+\s*-?\s*(?:й|я|ый|ая|ой|ий)?\s*(?:том|т[oо]м|часть|т|ч|t[oо]m|vol(?:ume)?|volume|part|pt)(?!\w)\.?",
+    r"|(?<!\w)\d+\s*-?\s*(?:й|я|ый|ая|ой|ий)?\s*(?:том|т[oо]м|часть|т|ч|t[oо]m|vol(?:ume)?|volume|part|pt)(?!\w)\.?"
+    r"|(?<=[^\W\d_])\d+\s*-?\s*(?:й|я|ый|ая|ой|ий)?\s*(?:том|т[oо]м|часть|т|ч)(?!\w)\.?",
     re.I
 )
 _VOLUME_NUMBER_RE = re.compile(
     r"(?<!\w)(?:часть|ч|том|т[oо]м|т|бөлім|t[oо]m|vol(?:ume)?|volume|part|pt)\.?\s*(\d+)(?!\w)"
-    r"|(?<!\w)(\d+)\s*-?\s*(?:й|я|ый|ая|ой|ий)?\s*(?:том|т[oо]м|часть|т|ч|t[oо]m|vol(?:ume)?|volume|part|pt)(?!\w)",
+    r"|(?<!\w)(\d+)\s*-?\s*(?:й|я|ый|ая|ой|ий)?\s*(?:том|т[oо]м|часть|т|ч|t[oо]m|vol(?:ume)?|volume|part|pt)(?!\w)"
+    r"|(?<=[^\W\d_])(\d+)\s*-?\s*(?:й|я|ый|ая|ой|ий)?\s*(?:том|т[oо]м|часть|т|ч)(?!\w)",
     re.I
 )
 
@@ -2677,7 +2693,7 @@ def _volume_number(file_name):
     if not match:
         return None
     try:
-        return int(match.group(1) or match.group(2))
+        return int(match.group(1) or match.group(2) or match.group(3))
     except (TypeError, ValueError):
         return None
 
