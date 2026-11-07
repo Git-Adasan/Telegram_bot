@@ -20,7 +20,11 @@ from dotenv import load_dotenv
 from collections import defaultdict
 from typing import Callable, Awaitable, Any
 
-logging.basicConfig(level=logging.INFO)
+_LOG_LEVEL = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
+logging.basicConfig(
+    level=_LOG_LEVEL,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 # =========================
@@ -45,7 +49,9 @@ def is_flood_callback(user_id: int) -> bool:
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_PATH = os.path.join(BASE_DIR, ".env")
-load_dotenv(ENV_PATH, override=True)
+load_dotenv(ENV_PATH, override=False)
+if os.name != "nt":
+    os.umask(0o077)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_ID_RAW = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
@@ -64,7 +70,13 @@ except ValueError as exc:
 # =========================
 # ADMIN
 # =========================
-ADMIN_ID    = 6277436867
+ADMIN_ID_RAW = os.getenv("ADMIN_ID", "6277436867").strip()
+try:
+    ADMIN_ID = int(ADMIN_ID_RAW)
+    if ADMIN_ID <= 0:
+        raise ValueError
+except ValueError as exc:
+    raise RuntimeError("ADMIN_ID должен быть положительным Telegram ID.") from exc
 ADMIN_URL   = "https://t.me/Tg_Adasan"
 ADMIN_NAME  = "@Tg_Adasan"
 CHANNEL     = "@library_adasan"
@@ -72,7 +84,7 @@ CHANNEL     = "@library_adasan"
 # =========================
 # БД
 # =========================
-DB_PATH = os.path.join(BASE_DIR, "adasan.db")
+DB_PATH = os.getenv("DB_PATH") or os.path.join(BASE_DIR, "adasan.db")
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -256,6 +268,8 @@ def get_book_history(user_id, limit=10):
     return rows
 
 def is_banned(user_id):
+    if user_id == ADMIN_ID:   # админ никогда не в бане
+        return False
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT user_id FROM banned_users WHERE user_id=?", (user_id,))
@@ -264,6 +278,8 @@ def is_banned(user_id):
     return row is not None
 
 def ban_user(user_id, reason=""):
+    if user_id == ADMIN_ID:   # админа банить нельзя
+        return
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("INSERT OR IGNORE INTO banned_users (user_id, banned_at, reason) VALUES (?,?,?)",
@@ -2001,6 +2017,7 @@ async def update_books_command(message: types.Message):
 
     try:
         from telethon import TelegramClient
+        from telethon.sessions import StringSession
         from telethon.tl.types import MessageMediaDocument, MessageMediaPhoto
         import json as _json2
 
@@ -2101,9 +2118,23 @@ async def update_books_command(message: types.Message):
                 total = 0
                 timeline = []       # (id, фото, документ, дата, id_альбома) — посты канала
                 book_entries = []   # (запись_книги, id_поста, дата, id_альбома)
-                session_path = os.path.join(BASE_DIR, "update_session")
+                session_string = os.getenv("TELETHON_SESSION_STRING", "").strip()
+                if session_string:
+                    session = StringSession(session_string)
+                else:
+                    session_path = os.getenv(
+                        "TELETHON_SESSION_PATH",
+                        os.path.join(BASE_DIR, "update_session"),
+                    )
+                    if not os.path.isfile(session_path + ".session"):
+                        raise RuntimeError(
+                            "Для обновления каталога задайте TELETHON_SESSION_STRING "
+                            "в переменных хостинга или подключите защищённый файл "
+                            "сессии через TELETHON_SESSION_PATH."
+                        )
+                    session = session_path
                 async with TelegramClient(
-                    session_path,
+                    session,
                     API_ID,
                     API_HASH,
                     lang_code="ru",
@@ -2250,8 +2281,11 @@ SUBJECT_HASHTAGS = {
 LANG_LABELS = {"rus": "🇷🇺 Русский", "kaz": "🇰🇿 Қазақша", "eng": "🇬🇧 English"}
 LANG_CAPTION = {"rus": "Русский", "kaz": "Қазақша", "eng": "English"}
 UPLOAD_EXT = (".pdf", ".doc", ".docx", ".ppt", ".pptx", ".txt", ".epub", ".djvu")
+MAX_UPLOAD_BYTES = 45 * 1024 * 1024
+UPLOAD_COOLDOWN_SECONDS = 3
 MAX_PENDING_PER_USER = 5
 _upload_state = set()  # user_id, которые нажали «Материал жіберу»
+_upload_last_time = {}
 
 def find_book_by_url(url):
     for sc, langs in BOOKS_DB.items():
@@ -2889,6 +2923,9 @@ UPLOAD_CANCEL_KB = InlineKeyboardMarkup(inline_keyboard=[
 ])
 
 async def start_upload(message: types.Message):
+    if message.chat.type != "private":
+        await message.answer("📤 Материалды бота жеке чатта жіберіңіз / Отправьте файл боту в личный чат.")
+        return
     _upload_state.add(message.from_user.id)
     await message.answer(
         "📤 Конспект немесе шпаргалка жібергіңіз келе ме?\n"
@@ -2923,10 +2960,20 @@ def submission_admin_kb(sub_id):
         InlineKeyboardButton(text="❌ Отклонить", callback_data=f"sbm_no_{sub_id}"),
     ]])
 
-@dp.message(lambda m: m.document is not None and m.from_user.id in _upload_state)
+@dp.message(lambda m: m.document is not None and m.chat.type == "private" and m.from_user and m.from_user.id in _upload_state)
 async def receive_material(message: types.Message):
     uid = message.from_user.id
     doc = message.document
+    now = time.monotonic()
+    if now - _upload_last_time.get(uid, 0) < UPLOAD_COOLDOWN_SECONDS:
+        await message.answer("⏳ Подождите немного перед следующей отправкой файла.")
+        return
+    _upload_last_time[uid] = now
+    if doc.file_size is not None and doc.file_size > MAX_UPLOAD_BYTES:
+        await message.answer(
+            "⚠️ Файл слишком большой. Максимальный размер — 45 МБ."
+        )
+        return
     fname = doc.file_name or "material"
     if not fname.lower().endswith(UPLOAD_EXT):
         await message.answer(
@@ -3180,7 +3227,7 @@ async def group_book_search(message: types.Message):
         return
     text = (message.text or "").strip()
     if len(text) < 4 or len(text) > 100 or text.startswith("/"):
-        logger.info(f"GROUP пропуск (длина/команда): {text[:30]!r}")
+        logger.debug("GROUP message skipped (length/command)")
         return
 
     now = time.time()
@@ -3192,7 +3239,7 @@ async def group_book_search(message: types.Message):
         return
 
     total, found = await asyncio.to_thread(fuzzy_find_books, text, GROUP_MAX_RESULTS + 1, GROUP_MIN_SCORE)
-    logger.info(f"GROUP запрос {text[:40]!r}: найдено {total}")
+    logger.info("GROUP search completed; results=%d", total)
     # Ничего не нашли или запрос слишком общий («анатомия») — молчим, не мешаем чату
     if not found or total > GROUP_MAX_RESULTS:
         return
@@ -3212,12 +3259,20 @@ async def group_book_search(message: types.Message):
 
 @dp.message(lambda m: m.photo)
 async def get_file_id(message: types.Message):
+    if (not message.from_user or message.from_user.id != ADMIN_ID
+            or message.chat.type != "private"):
+        return
     file_id = message.photo[-1].file_id
     await message.answer(f"file_id:\n`{file_id}`", parse_mode="Markdown")
 
 @dp.message()
 async def search(message: types.Message):
-    text = message.text or ""
+    if not message.from_user or not message.text:
+        return
+    text = message.text.strip()
+    if len(text) > 200:
+        await message.answer("🔎 Слишком длинный запрос. Напишите название короче (до 200 символов).")
+        return
     user_id = message.from_user.id
 
     # Игнорируем неизвестные команды (начинаются с /)
@@ -3233,7 +3288,7 @@ async def search(message: types.Message):
         spam_tracker[user_id] = []
     spam_tracker[user_id] = [t for t in spam_tracker[user_id] if (now - t).total_seconds() < 10]
     spam_tracker[user_id].append(now)
-    if len(spam_tracker[user_id]) >= 7:
+    if user_id != ADMIN_ID and len(spam_tracker[user_id]) >= 7:
         ban_user(user_id, "Автобан: спам")
         del spam_tracker[user_id]
         await message.answer(
