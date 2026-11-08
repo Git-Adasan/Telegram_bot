@@ -159,24 +159,6 @@ def init_db():
         lang TEXT,
         created_at TEXT
     )""")
-    # Запросы книг от пользователей
-    c.execute("""CREATE TABLE IF NOT EXISTS book_requests (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        username TEXT,
-        first_name TEXT,
-        query TEXT,
-        norm TEXT,
-        status TEXT DEFAULT 'open',
-        created_at TEXT
-    )""")
-    # Подписки на предметы
-    c.execute("""CREATE TABLE IF NOT EXISTS subscriptions (
-        user_id INTEGER,
-        subject_code TEXT,
-        created_at TEXT,
-        PRIMARY KEY (user_id, subject_code)
-    )""")
     conn.commit()
     conn.close()
 
@@ -286,8 +268,6 @@ def get_book_history(user_id, limit=10):
     return rows
 
 def is_banned(user_id):
-    if user_id == ADMIN_ID:   # админ никогда не в бане
-        return False
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT user_id FROM banned_users WHERE user_id=?", (user_id,))
@@ -296,8 +276,6 @@ def is_banned(user_id):
     return row is not None
 
 def ban_user(user_id, reason=""):
-    if user_id == ADMIN_ID:   # админа банить нельзя
-        return
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("INSERT OR IGNORE INTO banned_users (user_id, banned_at, reason) VALUES (?,?,?)",
@@ -1047,7 +1025,7 @@ def fuzzy_find_books(query, limit=5, min_score=0.0):
 
 
 async def send_subject_menu(chat_id, code):
-    name = SUBJECT_NAMES.get(code, "📚 Предмет")
+    name = SUBJECT_NAMES.get(code, "📚 Другое")
     photo_file = SUBJECT_PHOTOS.get(code)
     photo_path = os.path.join(BASE_DIR, photo_file) if photo_file else None
     if photo_path and os.path.exists(photo_path):
@@ -1211,7 +1189,7 @@ async def back_to_subject(callback: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data and c.data.startswith("books_"))
 async def books_handler(callback: types.CallbackQuery):
     code = callback.data.replace("books_", "")
-    name = SUBJECT_NAMES.get(code, "📚 Предмет")
+    name = SUBJECT_NAMES.get(code, "📚 Другое")
     photo_path = os.path.join(BASE_DIR, SUBJECT_PHOTOS.get(code, "adasan.jpg"))
     langs = BOOKS_DB.get(code, {})
     total = sum(len(v) for v in langs.values())
@@ -1255,7 +1233,7 @@ async def books_handler(callback: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data and c.data.startswith("silabus_"))
 async def silabus_handler(callback: types.CallbackQuery):
     code = callback.data.replace("silabus_", "")
-    name = SUBJECT_NAMES.get(code, "📚 Предмет")
+    name = SUBJECT_NAMES.get(code, "📚 Другое")
     photo_path = os.path.join(BASE_DIR, SUBJECT_PHOTOS.get(code, "adasan.jpg"))
     SILABUS_URLS = {
         "gistologiya": "https://t.me/library_adasan/436",
@@ -1358,7 +1336,7 @@ async def lektsiya_handler(callback: types.CallbackQuery):
         except Exception:
             pass
     else:
-        name = SUBJECT_NAMES.get(code, "📚 Предмет")
+        name = SUBJECT_NAMES.get(code, "📚 Другое")
         try:
             await callback.message.edit_caption(
                 caption=f"{name} — Лекция\n\n⏳ Скоро будет доступно!",
@@ -1404,7 +1382,7 @@ async def preparaty_handler(callback: types.CallbackQuery):
         except Exception:
             pass
     else:
-        name = SUBJECT_NAMES.get(code, "📚 Предмет")
+        name = SUBJECT_NAMES.get(code, "📚 Другое")
         try:
             await callback.message.edit_caption(
                 caption=f"{name} — Препараты\n\n⏳ Скоро будет доступно!",
@@ -1523,7 +1501,7 @@ def booklist_inline(subject_code, lang, page=0):
 async def booklang_handler(callback: types.CallbackQuery):
     _, subject_code, lang = callback.data.split("_", 2)
     books = BOOKS_DB.get(subject_code, {}).get(lang, [])
-    name = SUBJECT_NAMES.get(subject_code, "📚 Предмет")
+    name = SUBJECT_NAMES.get(subject_code, "📚 Другое")
     lang_name = {"rus": "🇷🇺 Русский", "kaz": "🇰🇿 Қазақша", "eng": "🇬🇧 English"}.get(lang, lang)
     try:
         await callback.message.edit_caption(
@@ -1543,7 +1521,7 @@ async def bookpage_handler(callback: types.CallbackQuery):
     subject_code = parts[1]
     lang = parts[2]
     page = int(parts[3])
-    name = SUBJECT_NAMES.get(subject_code, "📚 Предмет")
+    name = SUBJECT_NAMES.get(subject_code, "📚 Другое")
     lang_name = {"rus": "🇷🇺 Русский", "kaz": "🇰🇿 Қазақша", "eng": "🇬🇧 English"}.get(lang, lang)
     books = BOOKS_DB.get(subject_code, {}).get(lang, [])
     try:
@@ -1584,7 +1562,7 @@ async def bookopen_handler(callback: types.CallbackQuery):
     book = books_list[idx]
     name = book["file_name"].replace(".pdf","").replace(".djvu","").replace("_"," ")
     lang_name = {"rus": "🇷🇺 Русский", "kaz": "🇰🇿 Қазақша", "eng": "🇬🇧 English"}.get(lang, lang)
-    subject_name = SUBJECT_NAMES.get(subject_code, "📚 Предмет")
+    subject_name = SUBJECT_NAMES.get(subject_code, "📚 Другое")
     caption = (
         f"╔══════════════════════╗\n"
         f"  📖 {name[:40]}\n"
@@ -2261,20 +2239,7 @@ async def update_books_command(message: types.Message):
         with open(db_path, "w", encoding="utf-8") as f:
             _json2.dump(new_db, f, ensure_ascii=False, indent=2)
 
-        _old_db = BOOKS_DB
         BOOKS_DB = new_db
-
-        try:
-            _new_items = diff_new_books(_old_db, new_db)
-            if len(_new_items) > MAX_NOTIFY_BOOKS:
-                await message.answer(
-                    f"⚠️ Жаңа кітап өте көп ({len(_new_items)}): жазылушыларға хабарлама жіберілмеді.\n"
-                    f"Слишком много новых книг ({len(_new_items)}), подписчикам не отправлено (защита от ошибки)."
-                )
-            elif _new_items:
-                _spawn(notify_subscribers(_new_items))
-        except Exception as _e:
-            logger.error(f"notify new books failed: {_e}")
 
         stats_text = "\n".join([
             f"  📚 {s}: {len(l.get('rus',[]))} рус | {len(l.get('kaz',[]))} қаз | {len(l.get('eng',[]))} eng"
@@ -2694,7 +2659,6 @@ def catalog_keyboard():
             rows.append(row); row = []
     if row:
         rows.append(row)
-    rows.append([InlineKeyboardButton(text="🔔 Жаңа кітаптарға жазылу / Подписки", callback_data="sbs_open")])
     rows.append([InlineKeyboardButton(text="🏠 Таңдаулар / Меню / Menu", callback_data="go_main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -3152,7 +3116,6 @@ async def sbm_publish(callback: types.CallbackQuery):
         "url": f"https://t.me/{CHANNEL.lstrip('@')}/{msg.message_id}",
     })
     save_books_db()
-    _spawn(notify_subscribers([(code, lang, BOOKS_DB[code][lang][-1])]))
     set_submission_status(sub["id"], "approved", code, lang)
     try:
         await callback.message.edit_caption(
@@ -3298,322 +3261,6 @@ async def get_file_id(message: types.Message):
     file_id = message.photo[-1].file_id
     await message.answer(f"file_id:\n`{file_id}`", parse_mode="Markdown")
 
-# =========================
-# ЗАПРОС КНИГИ + ПОДПИСКА НА ПРЕДМЕТ
-# =========================
-from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
-
-REQ_DAILY_LIMIT = 5        # запросов книг в сутки от одного пользователя
-MAX_NOTIFY_BOOKS = 50      # больше новых книг за раз — рассылку не делаем (защита от сбоя)
-_pending_req = {}          # user_id -> текст, по которому книга не нашлась
-_bg_tasks = set()
-
-def _spawn(coro):
-    t = asyncio.create_task(coro)
-    _bg_tasks.add(t)
-    t.add_done_callback(_bg_tasks.discard)
-
-def _now_str():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-# ---------- запросы книг ----------
-def _req_norm(text):
-    return re.sub(r"\s+", " ", text.lower().strip())[:200]
-
-def add_book_request(user_id, username, first_name, query):
-    """Возвращает (статус, сколько_всего_открытых_запросов_на_это): статус ok | dup | limit."""
-    norm = _req_norm(query)
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        c = conn.cursor()
-        c.execute("SELECT 1 FROM book_requests WHERE user_id=? AND norm=? AND status='open'", (user_id, norm))
-        if c.fetchone():
-            return "dup", 0
-        today = datetime.now().strftime("%Y-%m-%d")
-        c.execute("SELECT COUNT(*) FROM book_requests WHERE user_id=? AND created_at LIKE ?", (user_id, today + "%"))
-        if c.fetchone()[0] >= REQ_DAILY_LIMIT:
-            return "limit", 0
-        c.execute(
-            "INSERT INTO book_requests (user_id, username, first_name, query, norm, status, created_at) "
-            "VALUES (?,?,?,?,?,'open',?)",
-            (user_id, username or "", first_name or "", query[:200], norm, _now_str()),
-        )
-        conn.commit()
-        c.execute("SELECT COUNT(DISTINCT user_id) FROM book_requests WHERE norm=? AND status='open'", (norm,))
-        return "ok", c.fetchone()[0]
-    finally:
-        conn.close()
-
-def get_top_requests(limit=10):
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        c = conn.cursor()
-        c.execute(
-            "SELECT MIN(id), MIN(query), COUNT(DISTINCT user_id) AS n FROM book_requests "
-            "WHERE status='open' GROUP BY norm ORDER BY n DESC, MIN(id) LIMIT ?", (limit,))
-        return c.fetchall()
-    finally:
-        conn.close()
-
-def close_requests_like(req_id):
-    """Закрывает все открытые запросы с тем же текстом, что у req_id. Возвращает (текст, [user_id])."""
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        c = conn.cursor()
-        c.execute("SELECT norm, query FROM book_requests WHERE id=?", (req_id,))
-        row = c.fetchone()
-        if not row:
-            return None, []
-        norm, query = row
-        c.execute("SELECT DISTINCT user_id FROM book_requests WHERE norm=? AND status='open'", (norm,))
-        uids = [r[0] for r in c.fetchall()]
-        c.execute("UPDATE book_requests SET status='done' WHERE norm=? AND status='open'", (norm,))
-        conn.commit()
-        return query, uids
-    finally:
-        conn.close()
-
-def _requests_view():
-    rows = get_top_requests(10)
-    if not rows:
-        return "📭 Ашық сұраулар жоқ / Открытых запросов нет.", None
-    lines = ["📩 Запросы книг (топ):\n"]
-    kb = []
-    for i, (rid, q, n) in enumerate(rows, 1):
-        lines.append(f"{i}. {q[:60]} — {n} чел.")
-        kb.append([InlineKeyboardButton(text=f"✅ {i}. добавлено → уведомить", callback_data=f"rqd_{rid}")])
-    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb)
-
-@dp.callback_query(F.data == "rqb_send")
-async def reqbook_send(callback: types.CallbackQuery):
-    uid = callback.from_user.id
-    q = _pending_req.get(uid)
-    if not q:
-        await callback.answer("Атауын қайта жазыңыз / Напишите название книги ещё раз", show_alert=True)
-        return
-    status, total = add_book_request(uid, callback.from_user.username, callback.from_user.first_name, q)
-    if status == "dup":
-        await callback.answer("✅ Бұл сұрау бұрын жіберілген / Этот запрос уже отправлен", show_alert=True)
-        return
-    if status == "limit":
-        await callback.answer(
-            f"⏳ Бүгінге лимит бітті ({REQ_DAILY_LIMIT}) / Лимит запросов на сегодня исчерпан ({REQ_DAILY_LIMIT})",
-            show_alert=True)
-        return
-    _pending_req.pop(uid, None)
-    try:
-        await bot.send_message(
-            ADMIN_ID,
-            f"📩 Запрос книги\n\n🔎 {q[:200]}\n"
-            f"👤 {callback.from_user.first_name}  @{callback.from_user.username or 'нет username'}\n"
-            f"🆔 {uid}\n"
-            f"👥 Всего просят: {total}\n\n/requests — все запросы"
-        )
-    except Exception as e:
-        logger.warning(f"admin notify (book request) failed: {e}")
-    try:
-        await callback.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🏠 Таңдаулар / Меню / Menu", callback_data="go_main_menu")],
-        ]))
-    except Exception:
-        pass
-    await callback.answer(
-        "✅ Сұрау жіберілді! Кітап қосылса, хабарлаймыз.\nЗапрос отправлен! Напишем, когда книга появится.",
-        show_alert=True)
-
-@dp.message(Command("requests"))
-async def requests_command(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    text, kb = _requests_view()
-    await message.answer(text, reply_markup=kb)
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("rqd_"))
-async def request_done(callback: types.CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
-        await callback.answer("❌ Рұқсат жоқ!", show_alert=True)
-        return
-    try:
-        rid = int(callback.data.split("_", 1)[1])
-    except ValueError:
-        await callback.answer()
-        return
-    query, uids = close_requests_like(rid)
-    if query is None:
-        await callback.answer("Уже обработано", show_alert=True)
-        return
-    ok = 0
-    for uid in uids:
-        try:
-            await bot.send_message(
-                uid,
-                f"📚 Сіз сұраған кітап қосылды / Книга, которую вы просили, добавлена:\n«{query[:100]}»\n\n"
-                "Атауын жазып іздеңіз / Напишите название в бот и найдите её."
-            )
-            ok += 1
-        except Exception:
-            pass
-        await asyncio.sleep(0.05)
-    text, kb = _requests_view()
-    try:
-        await callback.message.edit_text(text, reply_markup=kb)
-    except Exception:
-        pass
-    await callback.answer(f"✅ Хабарланды: {ok} / {len(uids)}", show_alert=True)
-
-# ---------- подписки на предметы ----------
-SUB_CODES = list(SUBJECTS.values())   # только основные предметы
-
-def get_user_subs(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        c = conn.cursor()
-        c.execute("SELECT subject_code FROM subscriptions WHERE user_id=?", (user_id,))
-        return {r[0] for r in c.fetchall()}
-    finally:
-        conn.close()
-
-def set_sub(user_id, code, on):
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        c = conn.cursor()
-        if on:
-            c.execute("INSERT OR IGNORE INTO subscriptions (user_id, subject_code, created_at) VALUES (?,?,?)",
-                      (user_id, code, _now_str()))
-        else:
-            c.execute("DELETE FROM subscriptions WHERE user_id=? AND subject_code=?", (user_id, code))
-        conn.commit()
-    finally:
-        conn.close()
-
-def get_subscribers(code):
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        c = conn.cursor()
-        c.execute("SELECT user_id FROM subscriptions WHERE subject_code=?", (code,))
-        return [r[0] for r in c.fetchall()]
-    finally:
-        conn.close()
-
-def remove_user_subs(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        conn.execute("DELETE FROM subscriptions WHERE user_id=?", (user_id,))
-        conn.commit()
-    finally:
-        conn.close()
-
-SUBS_TEXT = (
-    "🔔 Жаңа кітаптарға жазылу / Подписка на новые книги\n\n"
-    "Пәнді басыңыз — оған жаңа кітап қосылғанда бот хабарлайды.\n"
-    "Нажмите предмет — бот напишет, когда в него добавят новую книгу.\n\n"
-    "✅ — жазылғансыз / вы подписаны"
-)
-
-def subs_keyboard(user_id):
-    subs = get_user_subs(user_id)
-    rows, row = [], []
-    for code in SUB_CODES:
-        mark = "✅" if code in subs else "➕"
-        row.append(InlineKeyboardButton(text=f"{mark} {SUBJECT_NAMES.get(code, code)}", callback_data=f"sbs_t_{code}"))
-        if len(row) == 2:
-            rows.append(row); row = []
-    if row:
-        rows.append(row)
-    rows.append([InlineKeyboardButton(text="🏠 Таңдаулар / Меню / Menu", callback_data="go_main_menu")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-@dp.message(Command("subscribe"))
-async def subscribe_command(message: types.Message):
-    await message.answer(SUBS_TEXT, reply_markup=subs_keyboard(message.from_user.id))
-
-@dp.callback_query(F.data == "sbs_open")
-async def subscribe_open(callback: types.CallbackQuery):
-    await bot.send_message(callback.message.chat.id, SUBS_TEXT, reply_markup=subs_keyboard(callback.from_user.id))
-    await callback.answer()
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("sbs_t_"))
-async def subscribe_toggle(callback: types.CallbackQuery):
-    code = callback.data[len("sbs_t_"):]
-    if code not in SUB_CODES:
-        await callback.answer()
-        return
-    uid = callback.from_user.id
-    on = code not in get_user_subs(uid)
-    set_sub(uid, code, on)
-    try:
-        await callback.message.edit_reply_markup(reply_markup=subs_keyboard(uid))
-    except Exception:
-        pass
-    name = SUBJECT_NAMES.get(code, code)
-    await callback.answer(f"✅ Жазылдыңыз / Подписка: {name}" if on else f"🔕 Тоқтатылды / Отписка: {name}")
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("sbs_off_"))
-async def subscribe_off(callback: types.CallbackQuery):
-    code = callback.data[len("sbs_off_"):]
-    if code in SUB_CODES:
-        set_sub(callback.from_user.id, code, False)
-    await callback.answer(f"🔕 Тоқтатылды / Отписка: {SUBJECT_NAMES.get(code, code)}", show_alert=True)
-
-def diff_new_books(old_db, new_db):
-    """Книги, чьих url не было в старой базе. Пустая старая база -> пусто (чтобы не слать всё подряд)."""
-    old_urls = {bk.get("url") for langs in old_db.values() for books in langs.values() for bk in books}
-    old_urls.discard(None)
-    if not old_urls:
-        return []
-    items = []
-    for code, langs in new_db.items():
-        for lg, books in langs.items():
-            for bk in books:
-                u = bk.get("url")
-                if u and u not in old_urls:
-                    items.append((code, lg, bk))
-    return items
-
-async def notify_subscribers(new_items):
-    by_code = defaultdict(list)
-    for code, lg, bk in new_items:
-        by_code[code].append(bk)
-    sent = 0
-    for code, books in by_code.items():
-        if code not in SUB_CODES:
-            continue
-        subs = get_subscribers(code)
-        if not subs:
-            continue
-        titles = [bk["file_name"].rsplit(".", 1)[0].replace("_", " ")[:60] for bk in books[:5]]
-        more = len(books) - len(titles)
-        body = "\n".join(f"📖 {t}" for t in titles) + (f"\n…и ещё {more}" if more > 0 else "")
-        name = SUBJECT_NAMES.get(code, code)
-        text = f"🔔 Жаңа кітап / Новая книга\n{name}\n\n{body}"
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📖 Ашу / Открыть", callback_data=f"subject_{code}")],
-            [InlineKeyboardButton(text="🔕 Тоқтату / Отписаться", callback_data=f"sbs_off_{code}")],
-        ])
-        for uid in subs:
-            if is_banned(uid):
-                continue
-            for attempt in (1, 2):
-                try:
-                    await bot.send_message(uid, text, reply_markup=kb)
-                    sent += 1
-                    break
-                except TelegramForbiddenError:
-                    remove_user_subs(uid)   # заблокировал бота — подписки больше не нужны
-                    break
-                except TelegramRetryAfter as e:
-                    await asyncio.sleep(e.retry_after + 1)
-                except Exception as e:
-                    logger.warning(f"notify {uid} failed: {e}")
-                    break
-            await asyncio.sleep(0.05)
-    if sent:
-        try:
-            await bot.send_message(ADMIN_ID, f"🔔 Подписчикам отправлено уведомлений: {sent}")
-        except Exception:
-            pass
-    return sent
-
 @dp.message()
 async def search(message: types.Message):
     if not message.from_user or not message.text:
@@ -3637,7 +3284,7 @@ async def search(message: types.Message):
         spam_tracker[user_id] = []
     spam_tracker[user_id] = [t for t in spam_tracker[user_id] if (now - t).total_seconds() < 10]
     spam_tracker[user_id].append(now)
-    if user_id != ADMIN_ID and len(spam_tracker[user_id]) >= 7:
+    if len(spam_tracker[user_id]) >= 7:
         ban_user(user_id, "Автобан: спам")
         del spam_tracker[user_id]
         await message.answer(
@@ -3740,9 +3387,6 @@ async def search(message: types.Message):
         return
 
     # 4. Ничего не найдено
-    if len(_pending_req) > 5000:
-        _pending_req.clear()
-    _pending_req[user_id] = text
     await message.answer(
         "❌ Кітап табылмады / Книга не найдена / Book not found\n\n"
         "📚 Осы кітапты табу үшін / Чтобы найти эту книгу:\n\n"
@@ -3753,7 +3397,6 @@ async def search(message: types.Message):
         "• Физиол / Патфиз / Патанат\n"
         "• Синельников / Netter / Афанасьев...",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📩 Кітап сұрау / Запросить книгу", callback_data="rqb_send")],
             [InlineKeyboardButton(text="✉️ Администраторға жазу", url=ADMIN_URL)],
             [InlineKeyboardButton(text="🏠 Таңдаулар / Меню / Menu", callback_data="go_main_menu")],
         ])
@@ -3775,7 +3418,6 @@ async def main():
         BotCommand(command="popular",   description="🔥 Популярное"),
         BotCommand(command="catalog",   description="📋 Каталог / Все предметы"),
         BotCommand(command="upload",    description="📤 Материал жіберу"),
-        BotCommand(command="subscribe", description="🔔 Жазылу / Подписки"),
     ], scope=BotCommandScopeDefault())
 
     # Только админ видит эти команды
@@ -3787,8 +3429,6 @@ async def main():
         BotCommand(command="popular",      description="🔥 Популярное"),
         BotCommand(command="catalog",      description="📋 Каталог / Все предметы"),
         BotCommand(command="upload",       description="📤 Материал жіберу"),
-        BotCommand(command="subscribe",    description="🔔 Жазылу / Подписки"),
-        BotCommand(command="requests",     description="📩 Запросы книг"),
         BotCommand(command="stats",        description="📊 Статистика"),
         BotCommand(command="update_books", description="🔄 Кітаптарды жаңарту"),
         BotCommand(command="sort_other",   description="📦 Разобрать other"),
