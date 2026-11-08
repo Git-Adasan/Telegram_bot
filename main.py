@@ -637,7 +637,8 @@ SUBJECT_KEYWORDS = {
     "fiziologiya": ["физ","физио","физиол","физиология","физиологию","fiziol","fizyo"],
     "ishki":       ["ішкі","ішкі аурулар","ішкі ауру","ішкі аур","внутренние","внутренние болезни","внутренняя медицина","internal medicine","ішкіаурулар","ishki","терапия","терап","пропедевтика","пропедевт","пропед"],
     "patfiz":      ["патфиз","пат физ","патофизиология","патофизиол","patfiz","патфизиол"],
-    "patanat":     ["патанат","пат анат","патологическая анатомия","патанатомия","patanat","патанатом"],
+    "patanat":     ["патанат","пат анат","патологическая анатомия","патанатомия","patanat","патанатом",
+                    "патан","патология","патологии","патологию","патолог","pathology","pathological anatomy"],
     "toanat":      ["топанат","топ анат","топографическая анатомия","топографич","toanat"],
     "farmakologiya":  ["фармак","фарма","фармо","фармакология","фармакологию","фармако","pharmacology","pharmacological","pharmaco","pharmac","pharma","farmak"],
     "mikrobiologiya": ["микроб","microb","микробио"],
@@ -1025,7 +1026,7 @@ def fuzzy_find_books(query, limit=5, min_score=0.0):
 
 
 async def send_subject_menu(chat_id, code):
-    name = SUBJECT_NAMES.get(code, "📚 Другое")
+    name = SUBJECT_NAMES.get(code, "📚 Предмет")
     photo_file = SUBJECT_PHOTOS.get(code)
     photo_path = os.path.join(BASE_DIR, photo_file) if photo_file else None
     if photo_path and os.path.exists(photo_path):
@@ -1189,7 +1190,7 @@ async def back_to_subject(callback: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data and c.data.startswith("books_"))
 async def books_handler(callback: types.CallbackQuery):
     code = callback.data.replace("books_", "")
-    name = SUBJECT_NAMES.get(code, "📚 Другое")
+    name = SUBJECT_NAMES.get(code, "📚 Предмет")
     photo_path = os.path.join(BASE_DIR, SUBJECT_PHOTOS.get(code, "adasan.jpg"))
     langs = BOOKS_DB.get(code, {})
     total = sum(len(v) for v in langs.values())
@@ -1233,7 +1234,7 @@ async def books_handler(callback: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data and c.data.startswith("silabus_"))
 async def silabus_handler(callback: types.CallbackQuery):
     code = callback.data.replace("silabus_", "")
-    name = SUBJECT_NAMES.get(code, "📚 Другое")
+    name = SUBJECT_NAMES.get(code, "📚 Предмет")
     photo_path = os.path.join(BASE_DIR, SUBJECT_PHOTOS.get(code, "adasan.jpg"))
     SILABUS_URLS = {
         "gistologiya": "https://t.me/library_adasan/436",
@@ -1336,7 +1337,7 @@ async def lektsiya_handler(callback: types.CallbackQuery):
         except Exception:
             pass
     else:
-        name = SUBJECT_NAMES.get(code, "📚 Другое")
+        name = SUBJECT_NAMES.get(code, "📚 Предмет")
         try:
             await callback.message.edit_caption(
                 caption=f"{name} — Лекция\n\n⏳ Скоро будет доступно!",
@@ -1382,7 +1383,7 @@ async def preparaty_handler(callback: types.CallbackQuery):
         except Exception:
             pass
     else:
-        name = SUBJECT_NAMES.get(code, "📚 Другое")
+        name = SUBJECT_NAMES.get(code, "📚 Предмет")
         try:
             await callback.message.edit_caption(
                 caption=f"{name} — Препараты\n\n⏳ Скоро будет доступно!",
@@ -1501,7 +1502,7 @@ def booklist_inline(subject_code, lang, page=0):
 async def booklang_handler(callback: types.CallbackQuery):
     _, subject_code, lang = callback.data.split("_", 2)
     books = BOOKS_DB.get(subject_code, {}).get(lang, [])
-    name = SUBJECT_NAMES.get(subject_code, "📚 Другое")
+    name = SUBJECT_NAMES.get(subject_code, "📚 Предмет")
     lang_name = {"rus": "🇷🇺 Русский", "kaz": "🇰🇿 Қазақша", "eng": "🇬🇧 English"}.get(lang, lang)
     try:
         await callback.message.edit_caption(
@@ -1521,7 +1522,7 @@ async def bookpage_handler(callback: types.CallbackQuery):
     subject_code = parts[1]
     lang = parts[2]
     page = int(parts[3])
-    name = SUBJECT_NAMES.get(subject_code, "📚 Другое")
+    name = SUBJECT_NAMES.get(subject_code, "📚 Предмет")
     lang_name = {"rus": "🇷🇺 Русский", "kaz": "🇰🇿 Қазақша", "eng": "🇬🇧 English"}.get(lang, lang)
     books = BOOKS_DB.get(subject_code, {}).get(lang, [])
     try:
@@ -1562,7 +1563,7 @@ async def bookopen_handler(callback: types.CallbackQuery):
     book = books_list[idx]
     name = book["file_name"].replace(".pdf","").replace(".djvu","").replace("_"," ")
     lang_name = {"rus": "🇷🇺 Русский", "kaz": "🇰🇿 Қазақша", "eng": "🇬🇧 English"}.get(lang, lang)
-    subject_name = SUBJECT_NAMES.get(subject_code, "📚 Другое")
+    subject_name = SUBJECT_NAMES.get(subject_code, "📚 Предмет")
     caption = (
         f"╔══════════════════════╗\n"
         f"  📖 {name[:40]}\n"
@@ -2025,7 +2026,13 @@ async def update_books_command(message: types.Message):
             "#ішкіаурулар": "ishki", "#ішкі": "ishki",
             "#пропедевтика": "ishki", "#пропедевтики": "ishki", "#пропед": "ishki",
             "#внутренниеболезни": "ishki", "#внутренние": "ishki",
-            "#патфиз": "patfiz", "#патанат": "patanat",
+            "#патфиз": "patfiz", "#патофиз": "patfiz", "#патофизиология": "patfiz",
+            "#патфизиология": "patfiz",
+            # Патанат: все эти хэштеги = один предмет (patanat)
+            "#патанат": "patanat", "#патан": "patanat", "#патанатомия": "patanat",
+            "#патология": "patanat", "#патологии": "patanat", "#патологию": "patanat",
+            "#патологиялыканатомия": "patanat", "#патологическаяанатомия": "patanat",
+            "#pathology": "patanat", "#patanat": "patanat", "#patan": "patanat",
             "#топанат": "toanat", "#фармакология": "farmakologiya",
             "#фарма": "farmakologiya", "#фармо": "farmakologiya", "#фармако": "farmakologiya",
             "#pharmacology": "farmakologiya", "#pharmaco": "farmakologiya", "#pharma": "farmakologiya",
@@ -2040,7 +2047,7 @@ async def update_books_command(message: types.Message):
             "fiziologiya":    ["физиол","physiol","гайтон","судаков"],
             "ishki":          ["ішкі","ishki","внутренн","терапи","пропедевт","пропед","неотложн"],
             "patfiz":         ["патофиз","patofiz","патфиз"],
-            "patanat":        ["патанат","патологич","роббинс","струков"],
+            "patanat":        ["патанат","патан","патолог","pathology","роббинс","струков"],
             "toanat":         ["топограф","топка","оперативн"],
             "farmakologiya":  ["фармакол","фарма","фармо","фармако","pharmacology","pharmaco","pharmac","pharma","катцунг","харкевич"],
             "hirurgiya":      ["хирург","hirurg"],
@@ -2054,12 +2061,25 @@ async def update_books_command(message: types.Message):
             "eng": ["eng","english","netter","sobotta","gray","high-yield","textbook"],
         }
 
+        def tag_to_code(tag):
+            """Хэштег -> предмет. Сначала точный алиас, потом по началу слова.
+            #патанат, #патан, #патанатомия, #патология, #патологии... -> всё patanat.
+            Патфиз (#патфиз, #патологическаяфизиология...) отделяем по «физ»."""
+            if tag in HASHTAG_MAP:
+                return HASHTAG_MAP[tag]
+            t = tag.lstrip("#")
+            if t.startswith(("патан", "патолог", "pathol", "patan", "patolog")):
+                if "физ" in t or "fiz" in t:
+                    return "patfiz"
+                return "patanat"
+            return None
+
         def detect_subj(text):
             tl = text.lower().replace("ё", "е")
             # Проверяем каждый реальный хэштег отдельно и сначала сводим алиасы к предмету.
             # Например, #анат и #анатомия дают один код, а #патанат не путается с #анат.
             tag_tokens = ["#" + tag for tag in re.findall(r"(?<!\w)#(\w+)", tl)]
-            tag_codes = list(dict.fromkeys(HASHTAG_MAP[tag] for tag in tag_tokens if tag in HASHTAG_MAP))
+            tag_codes = list(dict.fromkeys(c for c in map(tag_to_code, tag_tokens) if c))
             if len(tag_codes) == 1:
                 return tag_codes[0]
             if len(tag_codes) > 1:
@@ -2475,7 +2495,7 @@ _CAT_STOP = {
 # Хэштеги, которые уже относятся к 14 готовым предметам: такие книги каталог не трогает
 _CAT_STATIC_STEMS = (
     "гист", "цитол", "эмбри", "анат", "anat", "anatom", "biochem", "биох", "бх", "физио", "физиол", "ішкі", "внутр",
-    "патфиз", "патофиз", "патфизиол", "патан", "патолог", "топ", "операт", "хирург",
+    "патфиз", "патофиз", "патфизиол", "патан", "патолог", "patan", "pathol", "patolog", "топ", "операт", "хирург",
     "пропед", "биохим", "биохи", "биоким", "биох", "бхим", "бх", "bkh", "biochem", "biochemistry",
     "фарма", "фармо", "pharma", "pharmac", "pharmaco", "микроб", "генет", "биофиз", "тарих",
 )
