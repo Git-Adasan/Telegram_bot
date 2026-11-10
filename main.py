@@ -228,6 +228,104 @@ def get_lang(user_id):
     conn.close()
     return row[0] if row and row[0] else "ru"
 
+
+# =========================
+# ТЕКСТЫ ИНТЕРФЕЙСА ПО ЯЗЫКУ ПОЛЬЗОВАТЕЛЯ (kz / ru / en)
+# =========================
+UI = {
+    "found_n": {
+        "kz": "🔍 Табылды: {n} кітап (көрсетілген: {k})",
+        "ru": "🔍 Найдено книг: {n} (показано: {k})",
+        "en": "🔍 Books found: {n} (showing: {k})",
+    },
+    "fuzzy_head": {
+        "kz": "🔍 Дәл сәйкестік жоқ, мүмкін, мынаны іздедіңіз бе?",
+        "ru": "🔍 Точного совпадения нет, возможно, вы искали:",
+        "en": "🔍 No exact match. Maybe you meant:",
+    },
+    "choose": {
+        "kz": "👇 Таңдаңыз:",
+        "ru": "👇 Выберите:",
+        "en": "👇 Choose:",
+    },
+    "not_found": {
+        "kz": ("❌ Кітап табылмады\n\n"
+               "📚 Бұл кітапты табу үшін:\n\n"
+               "👉 Администраторға жазыңыз: {admin}\n\n"
+               "━━━━━━━━━━━━━━━━━━━━━━\n"
+               "📌 Немесе пәннің атын жазыңыз:\n"
+               "• Гиста / Анат / Биохим\n"
+               "• Физиол / Патфиз / Патанат\n"
+               "• Синельников / Netter / Афанасьев..."),
+        "ru": ("❌ Книга не найдена\n\n"
+               "📚 Чтобы найти эту книгу:\n\n"
+               "👉 Напишите администратору: {admin}\n\n"
+               "━━━━━━━━━━━━━━━━━━━━━━\n"
+               "📌 Или напишите название предмета:\n"
+               "• Гиста / Анат / Биохим\n"
+               "• Физиол / Патфиз / Патанат\n"
+               "• Синельников / Netter / Афанасьев..."),
+        "en": ("❌ Book not found\n\n"
+               "📚 To find this book:\n\n"
+               "👉 Message the admin: {admin}\n\n"
+               "━━━━━━━━━━━━━━━━━━━━━━\n"
+               "📌 Or type a subject name:\n"
+               "• Histology / Anatomy / Biochemistry\n"
+               "• Physiology / Pathophysiology / Pathoanatomy\n"
+               "• Netter / Sinelnikov / Robbins..."),
+    },
+    "btn_admin": {
+        "kz": "✉️ Администраторға жазу",
+        "ru": "✉️ Написать администратору",
+        "en": "✉️ Message the admin",
+    },
+    "list_header": {
+        "kz": "{name} — Кітаптар\n{lang}\n\n👇 Таңдаңыз ({n} кітап):",
+        "ru": "{name} — Книги\n{lang}\n\n👇 Выберите ({n} книг):",
+        "en": "{name} — Books\n{lang}\n\n👇 Choose ({n} books):",
+    },
+    "card_subject": {"kz": "Пән:", "ru": "Предмет:", "en": "Subject:"},
+    "card_lang":    {"kz": "Тіл:", "ru": "Язык:", "en": "Language:"},
+    "fav_add_btn": {
+        "kz": "⭐ Таңдаулыға қосу",
+        "ru": "⭐ В избранное",
+        "en": "⭐ Add to favorites",
+    },
+    "book_nf_alert": {
+        "kz": "❌ Кітап табылмады!",
+        "ru": "❌ Книга не найдена!",
+        "en": "❌ Book not found!",
+    },
+    "fav_added": {
+        "kz": "⭐ Таңдаулыларға қосылды!",
+        "ru": "⭐ Добавлено в избранное!",
+        "en": "⭐ Added to favorites!",
+    },
+    "fav_exists": {
+        "kz": "✅ Бұл кітап бұрын қосылған!",
+        "ru": "✅ Эта книга уже в избранном!",
+        "en": "✅ Already in your favorites!",
+    },
+    "fav_removed": {
+        "kz": "🗑 Өшірілді!",
+        "ru": "🗑 Удалено!",
+        "en": "🗑 Removed!",
+    },
+    "favs_title": {
+        "kz": "⭐ Сіздің таңдаулыларыңыз ({n}):",
+        "ru": "⭐ Ваше избранное ({n}):",
+        "en": "⭐ Your favorites ({n}):",
+    },
+}
+
+def tr(user_id, key, **kw):
+    """Текст по языку пользователя. Если язык неизвестен — русский."""
+    lang = get_lang(user_id) if user_id else "ru"
+    if lang not in ("kz", "ru", "en"):
+        lang = "ru"
+    text = UI[key][lang]
+    return text.format(**kw) if kw else text
+
 def get_stats():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -637,8 +735,7 @@ SUBJECT_KEYWORDS = {
     "fiziologiya": ["физ","физио","физиол","физиология","физиологию","fiziol","fizyo"],
     "ishki":       ["ішкі","ішкі аурулар","ішкі ауру","ішкі аур","внутренние","внутренние болезни","внутренняя медицина","internal medicine","ішкіаурулар","ishki","терапия","терап","пропедевтика","пропедевт","пропед"],
     "patfiz":      ["патфиз","пат физ","патофизиология","патофизиол","patfiz","патфизиол"],
-    "patanat":     ["патанат","пат анат","патологическая анатомия","патанатомия","patanat","патанатом",
-                    "патан","патология","патологии","патологию","патолог","pathology","pathological anatomy"],
+    "patanat":     ["патанат","пат анат","патологическая анатомия","патанатомия","patanat","патанатом"],
     "toanat":      ["топанат","топ анат","топографическая анатомия","топографич","toanat"],
     "farmakologiya":  ["фармак","фарма","фармо","фармакология","фармакологию","фармако","pharmacology","pharmacological","pharmaco","pharmac","pharma","farmak"],
     "mikrobiologiya": ["микроб","microb","микробио"],
@@ -648,6 +745,21 @@ SUBJECT_KEYWORDS = {
     "hirurgiya":   ["хирург","hirurg","жалпы хир"],
     "stomatologiya": ["стоматология","стоматологию","стомат","стом","stomatology","dentistry"],
 }
+
+# Английские названия предметов (чем длиннее совпадение, тем оно точнее)
+_EN_SUBJECT_KEYWORDS = {
+    "gistologiya":    ["histology", "cytology", "embryology"],
+    "fiziologiya":    ["physiology"],
+    "patfiz":         ["pathophysiology", "pathological physiology", "pathologic physiology"],
+    "patanat":        ["pathoanatomy", "pathanatomy", "pathological anatomy", "pathologic anatomy"],
+    "toanat":         ["topographic anatomy", "topographical anatomy"],
+    "ishki":          ["propedeutics"],
+    "biofizika":      ["biophysics"],
+    "hirurgiya":      ["surgery", "surgical"],
+    "tarih":          ["history of kazakhstan", "kazakhstan history", "kazakh history"],
+}
+for _code, _extra in _EN_SUBJECT_KEYWORDS.items():
+    SUBJECT_KEYWORDS.setdefault(_code, []).extend(_extra)
 
 # =========================
 # МЕНЮ ПРЕДМЕТА (3 языка в кнопках)
@@ -885,6 +997,40 @@ def find_subject(query):
     return best_code
 
 
+
+# =========================
+# АНГЛИЙСКИЕ КНИГИ: определение по имени файла
+# (раньше всё без пометки «каз/eng» считалось русским)
+# =========================
+_EN_STOP = {"the", "of", "and", "for", "with", "in", "to", "an", "by", "on", "from", "at", "vs"}
+_EN_MED = {
+    "textbook", "atlas", "anatomy", "physiology", "biochemistry", "pharmacology", "pathology",
+    "clinical", "medical", "essential", "essentials", "review", "guide", "handbook", "principles",
+    "edition", "volume", "surgery", "histology", "immunology", "microbiology", "genetics", "basic",
+    "illustrated", "medicine", "diagnosis", "therapy", "disease", "diseases", "human", "molecular",
+    "biology", "neuroscience", "embryology", "pathophysiology", "pediatrics", "manual",
+    "fundamentals", "concise", "comprehensive", "lecture", "notes",
+}
+_EN_KNOWN = {
+    "pathoma", "netter", "sobotta", "gray", "guyton", "harper", "robbins", "junqueira",
+    "lippincott", "usmle", "kaplan", "costanzo", "boron", "ganong", "brs",
+    "gilroy", "chaurasia", "chaurasiae",
+}
+
+def _is_english_filename(fname):
+    """True, если имя файла выглядит английским (кириллицы нет, есть английские слова).
+    Транслит русских слов (Kommunalnaya_gigiena) сюда не попадает."""
+    name = re.sub(r"\.[A-Za-z0-9]{2,5}$", "", fname or "")
+    letters = re.findall(r"[^\W\d_]", name)
+    if len(letters) < 6 or any("\u0400" <= ch <= "\u04FF" for ch in letters):
+        return False
+    words = [w.lower() for w in re.findall(r"[A-Za-z]+", name)]
+    if any(w in _EN_KNOWN for w in words) or {"first", "aid"} <= set(words):
+        return True
+    stop = sum(1 for w in words if w in _EN_STOP)
+    med = sum(1 for w in words if w in _EN_MED)
+    return stop >= 1 or med >= 2
+
 # =========================
 # УМНЫЙ ПОИСК КНИГ (опечатки + латиница)
 # =========================
@@ -1026,7 +1172,7 @@ def fuzzy_find_books(query, limit=5, min_score=0.0):
 
 
 async def send_subject_menu(chat_id, code):
-    name = SUBJECT_NAMES.get(code, "📚 Предмет")
+    name = SUBJECT_NAMES.get(code, "📚 Другое")
     photo_file = SUBJECT_PHOTOS.get(code)
     photo_path = os.path.join(BASE_DIR, photo_file) if photo_file else None
     if photo_path and os.path.exists(photo_path):
@@ -1190,7 +1336,7 @@ async def back_to_subject(callback: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data and c.data.startswith("books_"))
 async def books_handler(callback: types.CallbackQuery):
     code = callback.data.replace("books_", "")
-    name = SUBJECT_NAMES.get(code, "📚 Предмет")
+    name = SUBJECT_NAMES.get(code, "📚 Другое")
     photo_path = os.path.join(BASE_DIR, SUBJECT_PHOTOS.get(code, "adasan.jpg"))
     langs = BOOKS_DB.get(code, {})
     total = sum(len(v) for v in langs.values())
@@ -1209,7 +1355,7 @@ async def books_handler(callback: types.CallbackQuery):
             chat_id=callback.message.chat.id,
             photo=FSInputFile(photo_path),
             caption=caption,
-            reply_markup=lang_inline(code)
+            reply_markup=lang_inline(code, callback.from_user.id)
         )
         try:
             await callback.message.delete()
@@ -1234,7 +1380,7 @@ async def books_handler(callback: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data and c.data.startswith("silabus_"))
 async def silabus_handler(callback: types.CallbackQuery):
     code = callback.data.replace("silabus_", "")
-    name = SUBJECT_NAMES.get(code, "📚 Предмет")
+    name = SUBJECT_NAMES.get(code, "📚 Другое")
     photo_path = os.path.join(BASE_DIR, SUBJECT_PHOTOS.get(code, "adasan.jpg"))
     SILABUS_URLS = {
         "gistologiya": "https://t.me/library_adasan/436",
@@ -1337,7 +1483,7 @@ async def lektsiya_handler(callback: types.CallbackQuery):
         except Exception:
             pass
     else:
-        name = SUBJECT_NAMES.get(code, "📚 Предмет")
+        name = SUBJECT_NAMES.get(code, "📚 Другое")
         try:
             await callback.message.edit_caption(
                 caption=f"{name} — Лекция\n\n⏳ Скоро будет доступно!",
@@ -1383,7 +1529,7 @@ async def preparaty_handler(callback: types.CallbackQuery):
         except Exception:
             pass
     else:
-        name = SUBJECT_NAMES.get(code, "📚 Предмет")
+        name = SUBJECT_NAMES.get(code, "📚 Другое")
         try:
             await callback.message.edit_caption(
                 caption=f"{name} — Препараты\n\n⏳ Скоро будет доступно!",
@@ -1460,18 +1606,22 @@ async def video_handler(callback: types.CallbackQuery):
 # =========================
 # INLINE — язык книг из BOOKS_DB
 # =========================
-def lang_inline(subject_code):
-    buttons = []
+def lang_inline(subject_code, uid=None):
+    by_lang = {}
     langs = BOOKS_DB.get(subject_code, {})
     if langs.get("rus"):
-        buttons.append(InlineKeyboardButton(
-            text=f"🇷🇺 Русский ({len(langs['rus'])})", callback_data=f"bl_{subject_code}_rus"))
+        by_lang["rus"] = InlineKeyboardButton(
+            text=f"🇷🇺 Русский ({len(langs['rus'])})", callback_data=f"bl_{subject_code}_rus")
     if langs.get("kaz"):
-        buttons.append(InlineKeyboardButton(
-            text=f"🇰🇿 Қазақша ({len(langs['kaz'])})", callback_data=f"bl_{subject_code}_kaz"))
+        by_lang["kaz"] = InlineKeyboardButton(
+            text=f"🇰🇿 Қазақша ({len(langs['kaz'])})", callback_data=f"bl_{subject_code}_kaz")
     if langs.get("eng"):
-        buttons.append(InlineKeyboardButton(
-            text=f"🇬🇧 English ({len(langs['eng'])})", callback_data=f"bl_{subject_code}_eng"))
+        by_lang["eng"] = InlineKeyboardButton(
+            text=f"🇬🇧 English ({len(langs['eng'])})", callback_data=f"bl_{subject_code}_eng")
+    order = ["rus", "kaz", "eng"]
+    if uid and get_lang(uid) == "en":
+        order = ["eng", "rus", "kaz"]      # английский интерфейс: English первым, остальные доступны
+    buttons = [by_lang[l] for l in order if l in by_lang]
     rows = [[b] for b in buttons]
     rows.append([InlineKeyboardButton(text="⬅ Артқа / Назад / Back", callback_data=f"subject_{subject_code}")])
     rows.append([InlineKeyboardButton(text="🏠 Таңдаулар / Меню / Menu", callback_data="go_main_menu")])
@@ -1502,16 +1652,16 @@ def booklist_inline(subject_code, lang, page=0):
 async def booklang_handler(callback: types.CallbackQuery):
     _, subject_code, lang = callback.data.split("_", 2)
     books = BOOKS_DB.get(subject_code, {}).get(lang, [])
-    name = SUBJECT_NAMES.get(subject_code, "📚 Предмет")
+    name = SUBJECT_NAMES.get(subject_code, "📚 Другое")
     lang_name = {"rus": "🇷🇺 Русский", "kaz": "🇰🇿 Қазақша", "eng": "🇬🇧 English"}.get(lang, lang)
     try:
         await callback.message.edit_caption(
-            caption=f"{name} — Кітаптар\n{lang_name}\n\n👇 Таңдаңыз ({len(books)} кітап):",
+            caption=tr(callback.from_user.id, "list_header", name=name, lang=lang_name, n=len(books)),
             reply_markup=booklist_inline(subject_code, lang, 0)
         )
     except:
         await callback.message.edit_text(
-            text=f"{name} — Кітаптар\n{lang_name}\n\n👇 Таңдаңыз ({len(books)} кітап):",
+            text=tr(callback.from_user.id, "list_header", name=name, lang=lang_name, n=len(books)),
             reply_markup=booklist_inline(subject_code, lang, 0)
         )
     await callback.answer()
@@ -1522,26 +1672,26 @@ async def bookpage_handler(callback: types.CallbackQuery):
     subject_code = parts[1]
     lang = parts[2]
     page = int(parts[3])
-    name = SUBJECT_NAMES.get(subject_code, "📚 Предмет")
+    name = SUBJECT_NAMES.get(subject_code, "📚 Другое")
     lang_name = {"rus": "🇷🇺 Русский", "kaz": "🇰🇿 Қазақша", "eng": "🇬🇧 English"}.get(lang, lang)
     books = BOOKS_DB.get(subject_code, {}).get(lang, [])
     try:
         await callback.message.edit_caption(
-            caption=f"{name} — Кітаптар\n{lang_name}\n\n👇 Таңдаңыз ({len(books)} кітап):",
+            caption=tr(callback.from_user.id, "list_header", name=name, lang=lang_name, n=len(books)),
             reply_markup=booklist_inline(subject_code, lang, page)
         )
     except:
         await callback.message.edit_text(
-            text=f"{name} — Кітаптар\n{lang_name}\n\n👇 Таңдаңыз ({len(books)} кітап):",
+            text=tr(callback.from_user.id, "list_header", name=name, lang=lang_name, n=len(books)),
             reply_markup=booklist_inline(subject_code, lang, page)
         )
     await callback.answer()
 
-def book_card_keyboard(subject_code, lang, idx, url):
+def book_card_keyboard(subject_code, lang, idx, url, uid=None):
     likes, dislikes = get_votes(url)
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📥 Жүктеу / Скачать / Download", url=url)],
-        [InlineKeyboardButton(text="⭐ Таңдаулыға қосу", callback_data=f"fav_add_{subject_code}_{lang}_{idx}")],
+        [InlineKeyboardButton(text=tr(uid, "fav_add_btn") if uid else "⭐ Таңдаулыға қосу", callback_data=f"fav_add_{subject_code}_{lang}_{idx}")],
         [
             InlineKeyboardButton(text=f"👍 {likes}", callback_data=f"rate_up_{subject_code}_{lang}_{idx}"),
             InlineKeyboardButton(text=f"👎 {dislikes}", callback_data=f"rate_dn_{subject_code}_{lang}_{idx}"),
@@ -1558,22 +1708,22 @@ async def bookopen_handler(callback: types.CallbackQuery):
     idx = int(parts[3])
     books_list = BOOKS_DB.get(subject_code, {}).get(lang, [])
     if idx >= len(books_list):
-        await callback.answer("❌ Кітап табылмады!", show_alert=True)
+        await callback.answer(tr(callback.from_user.id, "book_nf_alert"), show_alert=True)
         return
     book = books_list[idx]
     name = book["file_name"].replace(".pdf","").replace(".djvu","").replace("_"," ")
     lang_name = {"rus": "🇷🇺 Русский", "kaz": "🇰🇿 Қазақша", "eng": "🇬🇧 English"}.get(lang, lang)
-    subject_name = SUBJECT_NAMES.get(subject_code, "📚 Предмет")
+    subject_name = SUBJECT_NAMES.get(subject_code, "📚 Другое")
     caption = (
         f"╔══════════════════════╗\n"
         f"  📖 {name[:40]}\n"
         f"╚══════════════════════╝\n\n"
-        f"📚 Пән: {subject_name}\n"
-        f"🌐 Тіл: {lang_name}\n\n"
+        f"📚 {tr(callback.from_user.id, 'card_subject')} {subject_name}\n"
+        f"🌐 {tr(callback.from_user.id, 'card_lang')} {lang_name}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📌 @library_adasan"
     )
-    keyboard = book_card_keyboard(subject_code, lang, idx, book["url"])
+    keyboard = book_card_keyboard(subject_code, lang, idx, book["url"], callback.from_user.id)
     sent = False
     cover_id = book.get("photo_message_id")
     source_chat = f"@{CHANNEL.lstrip('@')}"
@@ -1649,22 +1799,22 @@ async def fav_add_handler(callback: types.CallbackQuery):
     idx = int(parts[2])
     db_books = BOOKS_DB.get(subject_code, {}).get(lang, [])
     if idx >= len(db_books):
-        await callback.answer("❌ Кітап табылмады!", show_alert=True)
+        await callback.answer(tr(callback.from_user.id, "book_nf_alert"), show_alert=True)
         return
     book = db_books[idx]
     book_name = book["file_name"].replace(".pdf","").replace(".djvu","").replace("_"," ")[:50]
     book_url = book["url"]
     added = add_favorite(callback.from_user.id, subject_code, lang, idx, book_name, book_url)
     if added:
-        await callback.answer("⭐ Таңдаулыларға қосылды!", show_alert=True)
+        await callback.answer(tr(callback.from_user.id, "fav_added"), show_alert=True)
     else:
-        await callback.answer("✅ Бұл кітап бұрын қосылған!", show_alert=True)
+        await callback.answer(tr(callback.from_user.id, "fav_exists"), show_alert=True)
 
 
 async def fav_del_handler(callback: types.CallbackQuery):
     url = callback.data.replace("fav_del_", "")
     remove_favorite(callback.from_user.id, url)
-    await callback.answer("🗑 Өшірілді!", show_alert=True)
+    await callback.answer(tr(callback.from_user.id, "fav_removed"), show_alert=True)
     favs = get_favorites(callback.from_user.id)
     if not favs:
         try:
@@ -1745,7 +1895,7 @@ async def favorites_button(message: types.Message):
             InlineKeyboardButton(text="🗑", callback_data=f"fav_del_{bu}"),
         ])
     rows.append([InlineKeyboardButton(text="🏠 Таңдаулар / Меню / Menu", callback_data="go_main_menu")])
-    await message.answer(f"⭐ Сіздің таңдаулыларыңыз ({len(favs)}):",
+    await message.answer(tr(message.from_user.id, "favs_title", n=len(favs)),
                          reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 @dp.message(lambda m: m.text and m.text.lower() == "📋 барлық пәндер")
@@ -2026,13 +2176,7 @@ async def update_books_command(message: types.Message):
             "#ішкіаурулар": "ishki", "#ішкі": "ishki",
             "#пропедевтика": "ishki", "#пропедевтики": "ishki", "#пропед": "ishki",
             "#внутренниеболезни": "ishki", "#внутренние": "ishki",
-            "#патфиз": "patfiz", "#патофиз": "patfiz", "#патофизиология": "patfiz",
-            "#патфизиология": "patfiz",
-            # Патанат: все эти хэштеги = один предмет (patanat)
-            "#патанат": "patanat", "#патан": "patanat", "#патанатомия": "patanat",
-            "#патология": "patanat", "#патологии": "patanat", "#патологию": "patanat",
-            "#патологиялыканатомия": "patanat", "#патологическаяанатомия": "patanat",
-            "#pathology": "patanat", "#patanat": "patanat", "#patan": "patanat",
+            "#патфиз": "patfiz", "#патанат": "patanat",
             "#топанат": "toanat", "#фармакология": "farmakologiya",
             "#фарма": "farmakologiya", "#фармо": "farmakologiya", "#фармако": "farmakologiya",
             "#pharmacology": "farmakologiya", "#pharmaco": "farmakologiya", "#pharma": "farmakologiya",
@@ -2047,7 +2191,7 @@ async def update_books_command(message: types.Message):
             "fiziologiya":    ["физиол","physiol","гайтон","судаков"],
             "ishki":          ["ішкі","ishki","внутренн","терапи","пропедевт","пропед","неотложн"],
             "patfiz":         ["патофиз","patofiz","патфиз"],
-            "patanat":        ["патанат","патан","патолог","pathology","роббинс","струков"],
+            "patanat":        ["патанат","патологич","роббинс","струков"],
             "toanat":         ["топограф","топка","оперативн"],
             "farmakologiya":  ["фармакол","фарма","фармо","фармако","pharmacology","pharmaco","pharmac","pharma","катцунг","харкевич"],
             "hirurgiya":      ["хирург","hirurg"],
@@ -2061,25 +2205,12 @@ async def update_books_command(message: types.Message):
             "eng": ["eng","english","netter","sobotta","gray","high-yield","textbook"],
         }
 
-        def tag_to_code(tag):
-            """Хэштег -> предмет. Сначала точный алиас, потом по началу слова.
-            #патанат, #патан, #патанатомия, #патология, #патологии... -> всё patanat.
-            Патфиз (#патфиз, #патологическаяфизиология...) отделяем по «физ»."""
-            if tag in HASHTAG_MAP:
-                return HASHTAG_MAP[tag]
-            t = tag.lstrip("#")
-            if t.startswith(("патан", "патолог", "pathol", "patan", "patolog")):
-                if "физ" in t or "fiz" in t:
-                    return "patfiz"
-                return "patanat"
-            return None
-
         def detect_subj(text):
             tl = text.lower().replace("ё", "е")
             # Проверяем каждый реальный хэштег отдельно и сначала сводим алиасы к предмету.
             # Например, #анат и #анатомия дают один код, а #патанат не путается с #анат.
             tag_tokens = ["#" + tag for tag in re.findall(r"(?<!\w)#(\w+)", tl)]
-            tag_codes = list(dict.fromkeys(c for c in map(tag_to_code, tag_tokens) if c))
+            tag_codes = list(dict.fromkeys(HASHTAG_MAP[tag] for tag in tag_tokens if tag in HASHTAG_MAP))
             if len(tag_codes) == 1:
                 return tag_codes[0]
             if len(tag_codes) > 1:
@@ -2177,6 +2308,8 @@ async def update_books_command(message: types.Message):
                         caption = msg.text or ""
                         subj = detect_subj(fname + " " + caption)
                         lang = detect_lang(fname + " " + caption)
+                        if lang == "rus" and _is_english_filename(fname):
+                            lang = "eng"
                         if subj not in new_db:
                             new_db[subj] = {"rus": [], "kaz": [], "eng": []}
                         entry = {
@@ -2495,7 +2628,7 @@ _CAT_STOP = {
 # Хэштеги, которые уже относятся к 14 готовым предметам: такие книги каталог не трогает
 _CAT_STATIC_STEMS = (
     "гист", "цитол", "эмбри", "анат", "anat", "anatom", "biochem", "биох", "бх", "физио", "физиол", "ішкі", "внутр",
-    "патфиз", "патофиз", "патфизиол", "патан", "патолог", "patan", "pathol", "patolog", "топ", "операт", "хирург",
+    "патфиз", "патофиз", "патфизиол", "патан", "патолог", "топ", "операт", "хирург",
     "пропед", "биохим", "биохи", "биоким", "биох", "бхим", "бх", "bkh", "biochem", "biochemistry",
     "фарма", "фармо", "pharma", "pharmac", "pharmaco", "микроб", "генет", "биофиз", "тарих",
 )
@@ -2645,14 +2778,14 @@ async def send_subject_menu(chat_id, code):
             chat_id,
             f"{_DYN_NAMES[code]}\n\n📖 Барлығы: {total} кітап\n\n"
             "👇 Тілді таңдаңыз / Выберите язык / Choose language:",
-            reply_markup=lang_inline(code)
+            reply_markup=lang_inline(code, chat_id)
         )
         return
     await _orig_send_subject_menu(chat_id, code)
 
 _orig_lang_inline = lang_inline
-def lang_inline(subject_code):
-    kb = _orig_lang_inline(subject_code)
+def lang_inline(subject_code, uid=None):
+    kb = _orig_lang_inline(subject_code, uid)
     if subject_code not in _DYN_NAMES:
         return kb
     rows = []
@@ -2918,13 +3051,13 @@ async def rate_handler(callback: types.CallbackQuery):
         idx = int(idx_raw)
         book = BOOKS_DB[subject_code][lang][idx]
     except (ValueError, KeyError, IndexError):
-        await callback.answer("❌ Кітап табылмады!", show_alert=True)
+        await callback.answer(tr(callback.from_user.id, "book_nf_alert"), show_alert=True)
         return
     vote = 1 if direction == "up" else -1
     result = set_vote(callback.from_user.id, book["url"], vote)
     try:
         await callback.message.edit_reply_markup(
-            reply_markup=book_card_keyboard(subject_code, lang, idx, book["url"])
+            reply_markup=book_card_keyboard(subject_code, lang, idx, book["url"], callback.from_user.id)
         )
     except Exception:
         pass
@@ -3397,27 +3530,20 @@ async def search(message: types.Message):
                 text=f"{lang_flag} {name}", callback_data=f"bk_{sc}_{lang}_{idx}"
             )])
         if is_fuzzy:
-            head = "🔍 Дәл сәйкестік жоқ, мүмкін, мынаны іздедіңіз бе?\nТочного совпадения нет, возможно, вы искали:"
+            head = tr(message.from_user.id, "fuzzy_head")
         else:
-            head = f"🔍 Табылды: {total_found} кітап (көрсетілген: {len(results)})"
+            head = tr(message.from_user.id, "found_n", n=total_found, k=len(results))
         await message.answer(
-            f"{head}\n\n👇 Таңдаңыз:",
+            f"{head}\n\n{tr(message.from_user.id, 'choose')}",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
         )
         return
 
     # 4. Ничего не найдено
     await message.answer(
-        "❌ Кітап табылмады / Книга не найдена / Book not found\n\n"
-        "📚 Осы кітапты табу үшін / Чтобы найти эту книгу:\n\n"
-        f"👉 Администраторға жазыңыз: {ADMIN_NAME}\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "📌 Немесе предметті жазыңыз:\n"
-        "• Гиста / Анат / Биохим\n"
-        "• Физиол / Патфиз / Патанат\n"
-        "• Синельников / Netter / Афанасьев...",
+        tr(message.from_user.id, "not_found", admin=ADMIN_NAME),
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✉️ Администраторға жазу", url=ADMIN_URL)],
+            [InlineKeyboardButton(text=tr(message.from_user.id, "btn_admin"), url=ADMIN_URL)],
             [InlineKeyboardButton(text="🏠 Таңдаулар / Меню / Menu", callback_data="go_main_menu")],
         ])
     )
