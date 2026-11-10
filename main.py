@@ -656,21 +656,40 @@ def find_profanity(text):
 # =========================
 # КЛАВИАТУРЫ
 # =========================
-main_menu = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="🔬 Гистология"), KeyboardButton(text="🦴 Анатомия")],
-        [KeyboardButton(text="🧪 Биохимия"), KeyboardButton(text="⚡ Физиология")],
-        [KeyboardButton(text="🏥 Ішкі аурулар"), KeyboardButton(text="🔥 Патфиз")],
-        [KeyboardButton(text="🔭 Патанат"), KeyboardButton(text="🗺 Топанат")],
-        [KeyboardButton(text="💊 Фармакология"), KeyboardButton(text="🦠 Микробиология")],
-        [KeyboardButton(text="🧬 Генетика"), KeyboardButton(text="⚗️ Биофизика")],
-        [KeyboardButton(text="📜 Тарих"), KeyboardButton(text="✂️ Хирургия")],
-        [KeyboardButton(text="⭐ Таңдаулылар"), KeyboardButton(text="📋 Барлық пәндер")],
-        [KeyboardButton(text="📖 История"), KeyboardButton(text="🔥 Популярное")],
-        [KeyboardButton(text="📤 Материал жіберу")],
-    ],
-    resize_keyboard=True
-)
+def main_menu_keyboard(lang="kz"):
+    """Reply-клавиатура: названия предметов отображаются на языке интерфейса."""
+    labels = {
+        "kz": [
+            ("🔬 Гистология", "🦴 Анатомия"), ("🧪 Биохимия", "⚡ Физиология"),
+            ("🏥 Ішкі аурулар", "🔥 Патфиз"), ("🔭 Патанат", "🗺 Топанат"),
+            ("💊 Фармакология", "🦠 Микробиология"), ("🧬 Генетика", "⚗️ Биофизика"),
+            ("📜 Тарих", "✂️ Хирургия"),
+        ],
+        "ru": [
+            ("🔬 Гистология", "🦴 Анатомия"), ("🧪 Биохимия", "⚡ Физиология"),
+            ("🏥 Внутренние болезни", "🔥 Патофизиология"), ("🔭 Патанатомия", "🗺 Топографическая анатомия"),
+            ("💊 Фармакология", "🦠 Микробиология"), ("🧬 Генетика", "⚗️ Биофизика"),
+            ("📜 История Казахстана", "✂️ Хирургия"),
+        ],
+        "en": [
+            ("🔬 Histology", "🦴 Anatomy"), ("🧪 Biochemistry", "⚡ Physiology"),
+            ("🏥 Internal Medicine", "🔥 Pathophysiology"), ("🔭 Pathoanatomy", "🗺 Topographic Anatomy"),
+            ("💊 Pharmacology", "🦠 Microbiology"), ("🧬 Genetics", "⚗️ Biophysics"),
+            ("📜 Kazakhstan History", "✂️ Surgery"),
+        ],
+    }
+    lang = lang if lang in labels else "ru"
+    rows = [[KeyboardButton(text=a), KeyboardButton(text=b)] for a, b in labels[lang]]
+    common = {
+        "kz": [("⭐ Таңдаулылар", "📋 Барлық пәндер"), ("📖 Іздеу тарихы", "🔥 Танымал"), ("📤 Материал жіберу",)],
+        "ru": [("⭐ Избранное", "📋 Все предметы"), ("📖 История поиска", "🔥 Популярное"), ("📤 Отправить материал",)],
+        "en": [("⭐ Favorites", "📋 All subjects"), ("📖 Search history", "🔥 Popular"), ("📤 Submit material",)],
+    }[lang]
+    rows.extend([[KeyboardButton(text=x) for x in row] for row in common])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+# Совместимость со старыми вызовами; новые сообщения используют клавиатуру по языку.
+main_menu = main_menu_keyboard("kz")
 
 SUBJECTS = {
     "🔬 гистология": "gistologiya",
@@ -688,6 +707,20 @@ SUBJECTS = {
     "📜 тарих": "tarih",
     "✂️ хирургия": "hirurgiya",
 }
+
+# Тексты кнопок для трёх языков ведут в те же разделы.
+SUBJECTS.update({
+    "🔬 histology": "gistologiya", "🦴 anatomy": "anatomiya",
+    "🧪 biochemistry": "biohimiya", "⚡ physiology": "fiziologiya",
+    "🏥 internal medicine": "ishki", "🔥 pathophysiology": "patfiz",
+    "🔭 pathoanatomy": "patanat", "🗺 topographic anatomy": "toanat",
+    "💊 pharmacology": "farmakologiya", "🦠 microbiology": "mikrobiologiya",
+    "🧬 genetics": "genetika", "⚗️ biophysics": "biofizika",
+    "📜 kazakhstan history": "tarih", "✂️ surgery": "hirurgiya",
+    "🏥 внутренние болезни": "ishki", "🔥 патофизиология": "patfiz",
+    "🔭 патанатомия": "patanat", "🗺 топографическая анатомия": "toanat",
+    "📜 история казахстана": "tarih",
+})
 
 SUBJECT_NAMES = {
     "gistologiya":    "🔬 Гистология",
@@ -1171,6 +1204,133 @@ def fuzzy_find_books(query, limit=5, min_score=0.0):
     return len(ranked), results
 
 
+# Синонимы предметов для поиска книг: пользователь может писать на русском,
+# казахском, английском или латиницей. Каталог книг при этом не переименовывается.
+_SEARCH_ALIAS_GROUPS = [
+    ("гистология", "histology", "гисто", "гиста", "histologia", "гисталогия"),
+    ("анатомия", "anatomy", "anatomi", "анат", "анато"),
+    ("биохимия", "biochemistry", "biochem", "биохим", "биокимия"),
+    ("физиология", "physiology", "fiziologiya", "физиол", "физио"),
+    ("патофизиология", "pathophysiology", "pathophysiolgy", "патфиз", "патофиз"),
+    ("патанатомия", "pathoanatomy", "pathological anatomy", "патанат"),
+    ("топографическая анатомия", "topographic anatomy", "topographical anatomy", "топанат"),
+    ("фармакология", "pharmacology", "pharmacolgy", "фарма", "фармак"),
+    ("микробиология", "microbiology", "microbiolgy", "микробио"),
+    ("генетика", "genetics", "genetic", "генет"),
+    ("биофизика", "biophysics", "биофиз"),
+    ("хирургия", "surgery", "surgical", "хирург"),
+    ("внутренние болезни", "internal medicine", "ішкі аурулар", "пропедевтика"),
+    ("история казахстана", "kazakhstan history", "kazakh history", "қазақстан тарихы"),
+]
+
+def expand_search_queries(query):
+    """Добавляет языковые варианты предметных слов, в том числе внутри названия книги."""
+    original = query.strip()
+    normalized_query = _norm_q(original)
+    variants = [original]
+    query_tokens = normalized_query.split()
+
+    for group in _SEARCH_ALIAS_GROUPS:
+        aliases = [_norm_q(alias) for alias in group if _norm_q(alias)]
+        matched_token = None
+
+        # Сначала ищем точное название/фразу.
+        if normalized_query in aliases:
+            matched_token = normalized_query
+        else:
+            # Затем ищем отдельное слово в запросе (например, "Junqueira Histolgy").
+            for token in query_tokens:
+                for alias in aliases:
+                    if " " in alias:
+                        continue
+                    if token == alias:
+                        matched_token = token
+                        break
+                    if len(alias) >= 6:
+                        threshold = 0.84 if len(alias) <= 9 else 0.78
+                        if _edit_sim(token, alias) >= threshold:
+                            matched_token = token
+                            break
+                if matched_token:
+                    break
+
+        if matched_token:
+            if normalized_query == matched_token:
+                variants.extend(group)
+            else:
+                # Сохраняем имя автора/прочие слова и заменяем только найденный термин.
+                for alias in group:
+                    variants.append(re.sub(
+                        re.escape(matched_token), alias, original, count=1, flags=re.IGNORECASE
+                    ))
+
+    out, seen = [], set()
+    for item in variants:
+        key = _norm_q(item)
+        if key and key not in seen:
+            seen.add(key)
+            out.append(item)
+    return out[:20]
+
+
+def find_subject_fuzzy(query):
+    """Находит раздел по английскому названию и небольшим опечаткам."""
+    q = _norm_q(query)
+    if not q:
+        return None
+    # Фраза из нескольких слов считается названием раздела только при точном совпадении.
+    if len(q.split()) > 1:
+        for code, aliases in SUBJECT_KEYWORDS.items():
+            if any(q == _norm_q(alias) for alias in aliases):
+                return code
+        for code, combos in SUBJECT_COMBOS.items():
+            if any(q == _norm_q(" ".join(stems)) for stems in combos):
+                return code
+        return None
+    direct = find_subject(query)
+    if direct:
+        return direct
+    best_code, best_score = None, 0.0
+    for code, aliases in SUBJECT_KEYWORDS.items():
+        for alias in aliases:
+            a = _norm_q(alias)
+            if len(a) < 6 or " " in a:
+                continue
+            score = _edit_sim(q, a)
+            threshold = 0.84 if len(a) <= 9 else 0.78
+            if score >= threshold and score > best_score:
+                best_code, best_score = code, score
+    return best_code
+
+
+async def search_books_multilingual(query, limit=5):
+    """Сначала ищет точные вхождения по языковым вариантам, затем fuzzy-совпадения."""
+    variants = expand_search_queries(query)
+    exact = {}
+    for variant in variants:
+        q = variant.lower().strip()
+        if not q:
+            continue
+        for sc, langs in BOOKS_DB.items():
+            for book_lang, books in langs.items():
+                for idx, bk in enumerate(books):
+                    fname = bk.get("file_name", "").lower()
+                    cap = bk.get("caption", "").lower()
+                    if q in fname or q in cap:
+                        exact[(sc, book_lang, idx)] = (sc, book_lang, idx, bk)
+    if exact:
+        results = list(exact.values())
+        return len(results), results[:limit], False
+
+    fuzzy = {}
+    for variant in variants:
+        total, found = await asyncio.to_thread(fuzzy_find_books, variant, limit * 2)
+        for sc, book_lang, idx, bk in found:
+            fuzzy[(sc, book_lang, idx)] = (sc, book_lang, idx, bk)
+    results = list(fuzzy.values())[:limit]
+    return len(fuzzy), results, bool(results)
+
+
 async def send_subject_menu(chat_id, code):
     name = SUBJECT_NAMES.get(code, "📚 Другое")
     photo_file = SUBJECT_PHOTOS.get(code)
@@ -1274,7 +1434,7 @@ async def setlang_handler(callback: types.CallbackQuery):
         caption=welcome,
         reply_markup=start_inline(lang)
     )
-    await bot.send_message(chat_id=callback.message.chat.id, text="👇", reply_markup=main_menu)
+    await bot.send_message(chat_id=callback.message.chat.id, text="👇", reply_markup=main_menu_keyboard(lang))
     await callback.answer()
 
 @dp.callback_query(lambda c: c.data == "check_sub")
@@ -3007,7 +3167,7 @@ if _catalog_migrated or _catalog_covers_added:
 @dp.message(lambda m: m.text and m.text.lower() == "📌 закладки")
 async def legacy_bookmark_message(message: types.Message):
     # у части пользователей ещё висит старая клавиатура — обновляем её на новую
-    await message.answer("📌 Закладки убрали. Меню обновлено 👇", reply_markup=main_menu)
+    await message.answer("📌 Закладки убрали. Меню обновлено 👇", reply_markup=main_menu_keyboard(get_lang(message.from_user.id)))
 
 @dp.callback_query(lambda c: c.data and c.data.startswith(("bmark_", "bmdel_", "show_bookmarks")))
 async def legacy_bookmark_callback(callback: types.CallbackQuery):
@@ -3428,6 +3588,14 @@ async def search(message: types.Message):
     if text.startswith("/"):
         return
 
+    # Reply-кнопки предметов могут приходить на любом из трёх языков.
+    normalized_button = _norm_q(text)
+    for button_text, code in SUBJECTS.items():
+        if _norm_q(button_text) == normalized_button:
+            log_stat(message.from_user.id, code, text)
+            await send_subject_menu(message.chat.id, code)
+            return
+
     # =============================
     # АНТИСПАМ — автобан
     # =============================
@@ -3496,29 +3664,14 @@ async def search(message: types.Message):
     # =============================
 
     # 1. Ищем предмет
-    subject_code = find_subject(text)
+    subject_code = find_subject_fuzzy(text)
     if subject_code:
         log_stat(message.from_user.id, subject_code, text)
         await send_subject_menu(message.chat.id, subject_code)
         return
 
-    # 3. Поиск в books_db.json
-    query = text.lower().strip()
-    found_books = []
-    for sc, langs in BOOKS_DB.items():
-        for lang, books in langs.items():
-            for idx, bk in enumerate(books):
-                fname = bk["file_name"].lower()
-                cap = bk.get("caption", "").lower()
-                if query in fname or query in cap:
-                    found_books.append((sc, lang, idx, bk))
-
-    # 3.1 Точного совпадения нет -> умный поиск (опечатки + латиница)
-    is_fuzzy = False
-    total_found = len(found_books)
-    if not found_books:
-        total_found, found_books = await asyncio.to_thread(fuzzy_find_books, text, 5)
-        is_fuzzy = bool(found_books)
+    # 3. Поиск в books_db.json: исходный запрос + языковые эквиваленты + fuzzy-поиск.
+    total_found, found_books, is_fuzzy = await search_books_multilingual(text, 5)
 
     if found_books:
         results = found_books[:5]
