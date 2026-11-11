@@ -124,6 +124,11 @@ def init_db():
         opened_at TEXT
     )""")
     # Заблокированные пользователи
+    c.execute("""CREATE TABLE IF NOT EXISTS admins (
+        user_id INTEGER PRIMARY KEY,
+        added_at TEXT,
+        added_by INTEGER
+    )""")
     c.execute("""CREATE TABLE IF NOT EXISTS banned_users (
         user_id INTEGER PRIMARY KEY,
         banned_at TEXT,
@@ -589,6 +594,74 @@ def migrate_db():
 init_db()
 migrate_db()
 
+# =========================
+# ПОМОЩНИКИ АДМИНА («правая рука»)
+# Владелец (ADMIN_ID) всегда выше. Помощники хранятся в БД (/addadmin) и/или в
+# переменной окружения EXTRA_ADMIN_IDS=111,222 (она не стирается при перезапуске).
+# =========================
+def _parse_ids(raw):
+    out = set()
+    for part in re.split(r"[,\s;]+", raw or ""):
+        if part.strip().isdigit():
+            out.add(int(part))
+    return out
+
+_ENV_HELPERS = _parse_ids(os.getenv("EXTRA_ADMIN_IDS", ""))
+_DB_HELPERS = set()
+
+def reload_helpers():
+    global _DB_HELPERS
+    conn = sqlite3.connect(DB_PATH)
+    _DB_HELPERS = {r[0] for r in conn.execute("SELECT user_id FROM admins")}
+    conn.close()
+
+def helper_ids():
+    return (_DB_HELPERS | _ENV_HELPERS) - {ADMIN_ID}
+
+def is_owner(user_id) -> bool:
+    return user_id == ADMIN_ID
+
+def is_staff(user_id) -> bool:
+    """Владелец или помощник."""
+    return user_id == ADMIN_ID or user_id in _DB_HELPERS or user_id in _ENV_HELPERS
+
+def add_helper(user_id, added_by):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("INSERT OR IGNORE INTO admins (user_id, added_at, added_by) VALUES (?,?,?)",
+                 (user_id, datetime.now().isoformat(), added_by))
+    conn.commit()
+    conn.close()
+    reload_helpers()
+
+def remove_helper(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM admins WHERE user_id=?", (user_id,))
+    conn.commit()
+    conn.close()
+    reload_helpers()
+
+def resolve_user(token):
+    """'@username' или число → (user_id, отображаемое имя) либо (None, None)."""
+    token = (token or "").strip()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        if token.startswith("@"):
+            row = conn.execute("SELECT user_id, first_name FROM users WHERE username=?",
+                               (token.lstrip("@"),)).fetchone()
+            return (row[0], f"{row[1]} ({token})") if row else (None, None)
+        if token.isdigit():
+            uid = int(token)
+            row = conn.execute("SELECT first_name, username FROM users WHERE user_id=?", (uid,)).fetchone()
+            if row:
+                uname = f" (@{row[1]})" if row[1] else ""
+                return uid, f"{row[0] or uid}{uname}"
+            return uid, str(uid)
+        return None, None
+    finally:
+        conn.close()
+
+reload_helpers()
+
 import json as _json
 _books_db_path = os.path.join(BASE_DIR, "books_db.json")
 if os.path.exists(_books_db_path):
@@ -621,7 +694,7 @@ class BanAndFloodMiddleware(BaseMiddleware):
                 except Exception:
                     pass
             return
-        if user_id == ADMIN_ID:
+        if is_staff(user_id):
             return await handler(event, data)
         # Флуд
         if hasattr(event, 'data'):  # callback
@@ -977,7 +1050,7 @@ class SubscriptionMiddleware(BaseMiddleware):
         chat = (event.message.chat if is_callback and event.message else getattr(event, "chat", None))
 
         # Пропускаем: нет пользователя, не личка, админ, /start, кнопка «Подписался»
-        if (not user or not chat or chat.type != "private" or user.id == ADMIN_ID
+        if (not user or not chat or chat.type != "private" or is_staff(user.id)
                 or (not is_callback and (getattr(event, "text", "") or "").startswith("/start"))
                 or (is_callback and event.data == "check_sub")):
             return await handler(event, data)
@@ -2165,7 +2238,7 @@ async def broadcast_command(message: types.Message):
 # =========================
 @dp.message(Command("stats"))
 async def stats_command(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
+    if not is_staff(message.from_user.id):
         await message.answer("❌ Рұқсат жоқ!")
         return
     total_users, total_searches, top_subjects, daily, new_users, top_books = get_detailed_stats()
@@ -2218,7 +2291,7 @@ async def stats_command(message: types.Message):
 @dp.message(Command("users"))
 async def users_command(message: types.Message):
     """Админ: список всех пользователей бота (кто пользуется)."""
-    if message.from_user.id != ADMIN_ID:
+    if not is_staff(message.from_user.id):
         await message.answer("❌ Рұқсат жоқ!")
         return
     rows = get_users_list()
@@ -2244,9 +2317,139 @@ async def users_command(message: types.Message):
     if chunk.strip():
         await message.answer(chunk, parse_mode="HTML", disable_web_page_preview=True)
 
+def admin_keyboard(user_id=None):
+    rows = [
+        [KeyboardButton(text="👥 Пользователи"), KeyboardButton(text="📊 Статистика")],
+    ]
+    if user_id is None or is_owner(user_id):
+        rows.append([KeyboardButton(text="🛡 Помощники"), KeyboardButton(text="🏠 Меню")])
+    else:
+        rows.append([KeyboardButton(text="🏠 Меню")])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+@dp.message(Command("admin"))
+async def admin_panel(message: types.Message):
+    """Админ/помощник: кнопки внизу экрана — не нужно печатать команды."""
+    if not is_staff(message.from_user.id):
+        await message.answer("❌ Рұқсат жоқ!")
+        return
+    await message.answer("🛠 Админ-панель", reply_markup=admin_keyboard(message.from_user.id))
+
+@dp.message(F.text == "👥 Пользователи", F.from_user.id.func(is_staff))
+async def admin_users_button(message: types.Message):
+    await users_command(message)
+
+@dp.message(F.text == "📊 Статистика", F.from_user.id.func(is_staff))
+async def admin_stats_button(message: types.Message):
+    await stats_command(message)
+
+@dp.message(F.text == "🏠 Меню", F.from_user.id.func(is_staff))
+async def admin_back_to_menu(message: types.Message):
+    await message.answer("🏠", reply_markup=main_menu_keyboard(get_lang(message.from_user.id)))
+
+HELPER_COMMANDS = [
+    ("start", "Начало / Бастау / Start"), ("menu", "Меню / Мәзір / Menu"),
+    ("admin", "🛠 Админ-панель"), ("stats", "📊 Статистика"), ("users", "👥 Список пользователей"),
+    ("ban", "🚫 Бан пользователя"), ("unban", "🔓 Разбан пользователя"), ("banlist", "📋 Список банов"),
+]
+
+async def apply_helper_commands(user_id):
+    from aiogram.types import BotCommand, BotCommandScopeChat
+    try:
+        await bot.set_my_commands([BotCommand(command=c, description=d) for c, d in HELPER_COMMANDS],
+                                  scope=BotCommandScopeChat(chat_id=user_id))
+    except Exception as e:
+        logger.warning(f"Не удалось задать команды помощнику {user_id}: {e}")
+
+async def clear_helper_commands(user_id):
+    from aiogram.types import BotCommandScopeChat
+    try:
+        await bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=user_id))
+    except Exception as e:
+        logger.warning(f"Не удалось сбросить команды {user_id}: {e}")
+
+async def _show_helpers(message: types.Message):
+    ids = sorted(helper_ids())
+    text = "🛡 <b>Помощники админа</b>\n\n👑 Владелец: вы\n"
+    if not ids:
+        text += "\nПомощников пока нет.\n"
+    for uid in ids:
+        _, name = resolve_user(str(uid))
+        from html import escape
+        text += f"• {escape(name or str(uid))} — id {uid}\n"
+    text += ("\n➕ /addadmin @username или id\n➖ /removeadmin @username или id\n\n"
+             "Помощник: /admin, /users, /stats, /ban, /unban, /banlist.\n"
+             "Только владелец: рассылка, /update_books, /sort_other, назначение помощников.")
+    await message.answer(text, parse_mode="HTML")
+
+@dp.message(Command("admins"))
+async def admins_command(message: types.Message):
+    if not is_owner(message.from_user.id):
+        await message.answer("❌ Рұқсат жоқ!")
+        return
+    await _show_helpers(message)
+
+@dp.message(F.text == "🛡 Помощники", F.from_user.id == ADMIN_ID)
+async def admins_button(message: types.Message):
+    await _show_helpers(message)
+
+@dp.message(Command("addadmin"))
+async def addadmin_command(message: types.Message):
+    if not is_owner(message.from_user.id):
+        await message.answer("❌ Только владелец может назначать помощников.")
+        return
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer("Использование: /addadmin @username или /addadmin 123456789")
+        return
+    uid, name = resolve_user(parts[1])
+    if not uid:
+        await message.answer("❌ Не найден. Человек должен хотя бы раз запустить бота, "
+                             "либо укажите его числовой ID.")
+        return
+    if is_owner(uid):
+        await message.answer("Вы и так владелец 👑")
+        return
+    if uid in helper_ids():
+        await message.answer(f"{name} уже помощник.")
+        return
+    add_helper(uid, message.from_user.id)
+    unban_user(uid)   # помощник не должен быть в бане
+    await apply_helper_commands(uid)
+    try:
+        await bot.send_message(uid, "🛡 Вас назначили помощником админа.\nОтправьте /admin — появятся кнопки.")
+    except Exception:
+        pass
+    await message.answer(f"✅ {name} теперь помощник админа.")
+
+@dp.message(Command("removeadmin"))
+async def removeadmin_command(message: types.Message):
+    if not is_owner(message.from_user.id):
+        await message.answer("❌ Только владелец может снимать помощников.")
+        return
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer("Использование: /removeadmin @username или /removeadmin 123456789")
+        return
+    uid, name = resolve_user(parts[1])
+    if not uid or uid not in helper_ids():
+        await message.answer("❌ Такого помощника нет. Список: /admins")
+        return
+    remove_helper(uid)
+    await clear_helper_commands(uid)
+    try:
+        await bot.send_message(uid, "Вы больше не помощник админа.",
+                               reply_markup=main_menu_keyboard(get_lang(uid)))
+    except Exception:
+        pass
+    note = ""
+    if uid in _ENV_HELPERS:
+        note = "\n⚠️ Он указан в EXTRA_ADMIN_IDS на хостинге — удалите его и оттуда."
+    await message.answer(f"✅ {name} больше не помощник.{note}")
+
 @dp.message(Command("ban"))
 async def ban_command(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
+    if not is_staff(message.from_user.id):
         await message.answer("❌ Рұқсат жоқ!")
         return
     parts = message.text.split(maxsplit=2)
@@ -2284,6 +2487,12 @@ async def ban_command(message: types.Message):
         except ValueError:
             await message.answer("❌ @username немесе ID (сан) жазыңыз!")
             return
+    if is_owner(target_id):
+        await message.answer("❌ Владельца заблокировать нельзя.")
+        return
+    if is_staff(target_id) and not is_owner(message.from_user.id):
+        await message.answer("❌ Помощника админа может заблокировать только владелец.")
+        return
     ban_user(target_id, reason)
     try:
         await bot.send_message(
@@ -2304,7 +2513,7 @@ async def ban_command(message: types.Message):
 
 @dp.message(Command("unban"))
 async def unban_command(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
+    if not is_staff(message.from_user.id):
         await message.answer("❌ Рұқсат жоқ!")
         return
     parts = message.text.split()
@@ -2325,7 +2534,7 @@ async def unban_command(message: types.Message):
 
 @dp.message(Command("banlist"))
 async def banlist_command(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
+    if not is_staff(message.from_user.id):
         await message.answer("❌ Рұқсат жоқ!")
         return
     banned = get_banned_list()
@@ -2347,7 +2556,7 @@ async def banlist_command(message: types.Message):
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("unban_"))
 async def unban_callback(callback: types.CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
+    if not is_staff(callback.from_user.id):
         await callback.answer("❌ Рұқсат жоқ!", show_alert=True)
         return
     target_id = int(callback.data.replace("unban_", ""))
@@ -3710,7 +3919,7 @@ async def search(message: types.Message):
     # =============================
     # АВТОБАН ЗА МАТЫ
     # =============================
-    mat = find_profanity(text) if user_id != ADMIN_ID else None
+    mat = find_profanity(text) if not is_staff(user_id) else None
     if mat:
         ban_user(message.from_user.id, f"Автобан: мат ({mat})")
         spam_tracker.pop(message.from_user.id, None)
@@ -3805,6 +4014,8 @@ async def main():
         BotCommand(command="upload",       description="📤 Материал жіберу"),
         BotCommand(command="stats",        description="📊 Статистика"),
         BotCommand(command="users",        description="👥 Список пользователей"),
+        BotCommand(command="admin",        description="🛠 Админ-панель (кнопки)"),
+        BotCommand(command="admins",       description="🛡 Помощники админа"),
         BotCommand(command="update_books", description="🔄 Кітаптарды жаңарту"),
         BotCommand(command="sort_other",   description="📦 Разобрать other"),
         BotCommand(command="broadcast",    description="📢 Рассылка"),
@@ -3812,6 +4023,9 @@ async def main():
         BotCommand(command="unban",        description="🔓 Разбан пользователя"),
         BotCommand(command="banlist",      description="📋 Список банов"),
     ], scope=BotCommandScopeChat(chat_id=ADMIN_ID))
+
+    for _uid in helper_ids():
+        await apply_helper_commands(_uid)
 
     # Мини-веб-сервер: Render (Web Service) требует открытый порт
     from aiohttp import web
