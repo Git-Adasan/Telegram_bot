@@ -420,6 +420,30 @@ def get_detailed_stats():
     conn.close()
     return total_users, total_searches, top_subjects, daily, new_users, top_books
 
+def get_monthly_activity():
+    """Поиски и новые пользователи по месяцам за ВСЁ время."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""SELECT SUBSTR(created_at,1,7) AS m, COUNT(*), COUNT(DISTINCT user_id)
+                 FROM stats WHERE created_at IS NOT NULL GROUP BY m ORDER BY m""")
+    searches = c.fetchall()
+    c.execute("""SELECT SUBSTR(joined_at,1,7) AS m, COUNT(*)
+                 FROM users WHERE joined_at IS NOT NULL GROUP BY m""")
+    joined = dict(c.fetchall())
+    conn.close()
+    return searches, joined
+
+def get_users_list():
+    """Все пользователи: id, username, имя, язык, дата входа, число поисков."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""SELECT u.user_id, u.username, u.first_name, u.lang, u.joined_at,
+                        (SELECT COUNT(*) FROM stats s WHERE s.user_id = u.user_id) AS n
+                 FROM users u ORDER BY u.joined_at DESC""")
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
 def get_all_user_ids():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -2163,6 +2187,11 @@ async def stats_command(message: types.Message):
     for day, cnt in daily:
         bar = "█" * min(cnt, 20)
         text += f"  {day}: {bar} {cnt}\n"
+    monthly, joined = get_monthly_activity()
+    if monthly:
+        text += "\n🗓 Барлық уақыт, айлар бойынша (іздеу | белсенді | жаңа):\n"
+        for m, n_search, n_active in monthly[-24:]:
+            text += f"  {m}: 🔍{n_search} | 👤{n_active} | 🆕{joined.get(m, 0)}\n"
     if top_books:
         text += "\n📖 Танымал кітаптар:\n"
         for i, (bname, cnt) in enumerate(top_books, 1):
@@ -2186,6 +2215,30 @@ async def stats_command(message: types.Message):
 # =========================
 # КОМАНДА — бан пользователя (только админ)
 # =========================
+@dp.message(Command("users"))
+async def users_command(message: types.Message):
+    """Админ: список всех пользователей бота (кто пользуется)."""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("❌ Рұқсат жоқ!")
+        return
+    rows = get_users_list()
+    if not rows:
+        await message.answer("Пока нет пользователей.")
+        return
+    lines = [f"👥 Пайдаланушылар: {len(rows)}\n(жаңадан → ескіге / новые сверху)\n"]
+    for uid, uname, fname, lang, joined, n in rows:
+        link = f"@{uname}" if uname else "—"
+        day = (joined or "")[:10]
+        lines.append(f"{fname or '—'} {link} | id {uid} | {lang} | {day} | 🔍{n}")
+    chunk = ""
+    for line in lines:
+        if len(chunk) + len(line) + 1 > 3800:   # лимит Telegram 4096
+            await message.answer(chunk)
+            chunk = ""
+        chunk += line + "\n"
+    if chunk:
+        await message.answer(chunk)
+
 @dp.message(Command("ban"))
 async def ban_command(message: types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -3746,6 +3799,7 @@ async def main():
         BotCommand(command="catalog",      description="📋 Каталог / Все предметы"),
         BotCommand(command="upload",       description="📤 Материал жіберу"),
         BotCommand(command="stats",        description="📊 Статистика"),
+        BotCommand(command="users",        description="👥 Список пользователей"),
         BotCommand(command="update_books", description="🔄 Кітаптарды жаңарту"),
         BotCommand(command="sort_other",   description="📦 Разобрать other"),
         BotCommand(command="broadcast",    description="📢 Рассылка"),
