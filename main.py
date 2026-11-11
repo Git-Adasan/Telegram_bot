@@ -5,7 +5,6 @@ from aiogram.types import (
     InlineKeyboardButton,
     FSInputFile,
     ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
     KeyboardButton,
     TelegramObject,
 )
@@ -18,7 +17,7 @@ import time
 from datetime import datetime
 from dotenv import load_dotenv
 from collections import defaultdict
-from typing import Callable, Awaitable, Any
+from typing import Callable, Any
 
 _LOG_LEVEL = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
 logging.basicConfig(
@@ -2327,6 +2326,31 @@ async def update_books_command(message: types.Message):
         from telethon.sessions import StringSession
         from telethon.tl.types import MessageMediaDocument, MessageMediaPhoto
         import json as _json2
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def _telethon_client(session):
+            """Подключается БЕЗ интерактивного входа.
+
+            `async with TelegramClient(...)` вызывает start(), а он при неавторизованной
+            сессии сам просит телефон/код через input() — на сервере это зависает и
+            Telegram шлёт «лишние» коды. Здесь только connect() + проверка авторизации.
+            """
+            client = TelegramClient(
+                session, API_ID, API_HASH,
+                lang_code="ru", system_lang_code="ru-RU",
+            )
+            await client.connect()
+            try:
+                if not await client.is_user_authorized():
+                    raise RuntimeError(
+                        "Telethon-сессия не авторизована. Создайте новую: "
+                        "python create_telethon_string.py (вход по QR), затем задайте "
+                        "TELETHON_SESSION_STRING."
+                    )
+                yield client
+            finally:
+                await client.disconnect()
 
         HASHTAG_MAP = {
             "#гистология": "gistologiya", "#анатомия": "anatomiya",
@@ -2440,13 +2464,7 @@ async def update_books_command(message: types.Message):
                             "сессии через TELETHON_SESSION_PATH."
                         )
                     session = session_path
-                async with TelegramClient(
-                    session,
-                    API_ID,
-                    API_HASH,
-                    lang_code="ru",
-                    system_lang_code="ru-RU",
-                ) as client:
+                async with _telethon_client(session) as client:
                     async for msg in client.iter_messages(CHANNEL, limit=5000):
                         is_document = bool(msg.media and isinstance(msg.media, MessageMediaDocument))
                         is_photo = bool(msg.media and isinstance(msg.media, MessageMediaPhoto))
@@ -3634,7 +3652,6 @@ async def search(message: types.Message):
     # =============================
     # АВТОБАН ЗА МАТЫ
     # =============================
-    text_lower = text.lower()
     mat = find_profanity(text) if user_id != ADMIN_ID else None
     if mat:
         ban_user(message.from_user.id, f"Автобан: мат ({mat})")
