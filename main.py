@@ -2225,19 +2225,24 @@ async def users_command(message: types.Message):
     if not rows:
         await message.answer("Пока нет пользователей.")
         return
-    lines = [f"👥 Пайдаланушылар: {len(rows)}\n(жаңадан → ескіге / новые сверху)\n"]
-    for uid, uname, fname, lang, joined, n in rows:
-        link = f"@{uname}" if uname else "—"
-        day = (joined or "")[:10]
-        lines.append(f"{fname or '—'} {link} | id {uid} | {lang} | {day} | 🔍{n}")
-    chunk = ""
+    from html import escape
+    header = f"👥 <b>Пайдаланушылар: {len(rows)}</b>\n\n"
+    lines = []
+    for i, (uid, uname, fname, lang, joined, n) in enumerate(rows, 1):
+        name = escape((fname or "—").strip() or "—")
+        if uname:
+            link = f'<a href="https://t.me/{escape(uname)}">@{escape(uname)}</a>'
+        else:
+            link = f'<a href="tg://user?id={uid}">профиль</a>'
+        lines.append(f"{i}. {name} — {link}")
+    chunk = header
     for line in lines:
         if len(chunk) + len(line) + 1 > 3800:   # лимит Telegram 4096
-            await message.answer(chunk)
+            await message.answer(chunk, parse_mode="HTML", disable_web_page_preview=True)
             chunk = ""
         chunk += line + "\n"
-    if chunk:
-        await message.answer(chunk)
+    if chunk.strip():
+        await message.answer(chunk, parse_mode="HTML", disable_web_page_preview=True)
 
 @dp.message(Command("ban"))
 async def ban_command(message: types.Message):
