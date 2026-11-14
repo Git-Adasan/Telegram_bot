@@ -3922,43 +3922,64 @@ def _vol_label(numbers):
 
 
 def _collect_series(lang, base_book):
-    """Все тома той же серии и того же языка (во всех разделах), по порядку номеров."""
+    """Все тома серии (во всех разделах), по порядку номеров.
+    Элемент: (номер, раздел, индекс, книга, язык).
+
+    Язык у файлов определяется по подписи, а подпись есть только у последнего файла
+    альбома: «Аубакиров 1–3 том» получили rus, а «4 том» — kaz. Поэтому тома ищем во всех
+    языках. Если же номера повторяются (русское и казахское издание с теми же томами),
+    это разные издания, и тогда берём только язык выбранной книги."""
     key, has_vol = _series_key(base_book.get("file_name", ""))
     if not has_vol or len(key) < 5:
         return []
     members = []
     for sc, langs in BOOKS_DB.items():
-        for idx, bk in enumerate(langs.get(lang, [])):
-            k, hv = _series_key(bk.get("file_name", ""))
-            if hv and k == key:
-                members.append((_vol_num(bk.get("file_name", "")), sc, idx, bk))
+        for lg, books in langs.items():
+            for idx, bk in enumerate(books):
+                k, hv = _series_key(bk.get("file_name", ""))
+                if hv and k == key:
+                    members.append((_vol_num(bk.get("file_name", "")), sc, idx, bk, lg))
+    nums = [m[0] for m in members if m[0] is not None]
+    if len(nums) != len(set(nums)):
+        members = [m for m in members if m[4] == lang]
     members.sort(key=lambda m: (m[0] is None, m[0] if m[0] is not None else 0,
                                 -m[3].get("message_id", 0)))
     return members
 
 
+def _group_lang(members):
+    """Язык серии для флажка. «rus» — язык по умолчанию (если в подписи нет признаков языка),
+    поэтому если среди томов есть другой язык, показываем его."""
+    langs = []
+    for m in members:
+        if m[4] not in langs:
+            langs.append(m[4])
+    others = [lg for lg in langs if lg != "rus"]
+    return others[0] if others else (langs[0] if langs else "rus")
+
+
 async def search_book_groups(query, limit=SEARCH_GROUPS_LIMIT):
     """Поиск, где тома одной серии объединены. Возвращает (всего_групп, группы, is_fuzzy).
-    Группа: {"sc", "lang", "idx", "book", "members": [...]}; members пуст, если книга одна."""
+    Группа: {"sc", "lang", "idx", "book", "members"}; members пуст, если книга одна."""
     _total, books, is_fuzzy = await search_books_multilingual(query, 10 ** 6)
-    groups, seen_series = [], set()
+    groups, consumed = [], set()
     for sc, lang, idx, bk in books:
-        key, has_vol = _series_key(bk.get("file_name", ""))
-        if has_vol and len(key) >= 5:
-            if (key, lang) in seen_series:
-                continue
-            members = _collect_series(lang, bk)
-            if len(members) >= 2:
-                seen_series.add((key, lang))
-                _n, msc, midx, mbk = members[0]
-                groups.append({"sc": msc, "lang": lang, "idx": midx, "book": mbk, "members": members})
-                continue
+        if (sc, lang, idx) in consumed:
+            continue
+        members = _collect_series(lang, bk)
+        if len(members) >= 2:
+            consumed.update((m[1], m[4], m[2]) for m in members)
+            first = members[0]
+            groups.append({"sc": first[1], "lang": first[4], "idx": first[2],
+                           "book": first[3], "members": members})
+            continue
         groups.append({"sc": sc, "lang": lang, "idx": idx, "book": bk, "members": []})
     return len(groups), groups[:limit], is_fuzzy
 
 
 def group_button(uid, g):
-    flag = {"rus": "🇷🇺", "kaz": "🇰🇿", "eng": "🇬🇧"}.get(g["lang"], "")
+    flag_lang = _group_lang(g["members"]) if g["members"] else g["lang"]
+    flag = {"rus": "🇷🇺", "kaz": "🇰🇿", "eng": "🇬🇧"}.get(flag_lang, "")
     if g["members"]:
         title = _series_title(g["book"].get("file_name", ""))[:30]
         vols = _vol_label([m[0] for m in g["members"]])
@@ -4007,7 +4028,8 @@ async def book_group_handler(callback: types.CallbackQuery):
         return
 
     title = _series_title(base.get("file_name", ""))
-    lang_name = {"rus": "🇷🇺 Русский", "kaz": "🇰🇿 Қазақша", "eng": "🇬🇧 English"}.get(lang, lang)
+    series_lang = _group_lang(members)
+    lang_name = {"rus": "🇷🇺 Русский", "kaz": "🇰🇿 Қазақша", "eng": "🇬🇧 English"}.get(series_lang, series_lang)
     subject_name = SUBJECT_NAMES.get(members[0][1], "📚 Другое")
     vols = _vol_label([m[0] for m in members])
     caption = (
@@ -4021,7 +4043,7 @@ async def book_group_handler(callback: types.CallbackQuery):
         f"📌 @library_adasan"
     )
     rows = []
-    for number, _sc, _idx, bk in members:
+    for number, _sc, _idx, bk, _lg in members:
         btn_text = (f"📥 {tr(uid, 'vol_btn')} {number}" if number is not None
                     else f"📥 {_plain_name(bk.get('file_name', ''))[:40]}")
         rows.append([InlineKeyboardButton(text=btn_text, url=bk["url"])])
@@ -4034,8 +4056,8 @@ async def book_group_handler(callback: types.CallbackQuery):
 
     try:
         first = members[0]
-        add_book_history(uid, first[1], lang, first[2], title[:50], first[3]["url"])
-        record_book_open(first[3]["url"], title[:50], first[1], lang)
+        add_book_history(uid, first[1], first[4], first[2], title[:50], first[3]["url"])
+        record_book_open(first[3]["url"], title[:50], first[1], first[4])
     except Exception as e:
         logger.warning(f"История серии не записалась: {e}")
     try:
