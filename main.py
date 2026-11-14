@@ -247,6 +247,9 @@ UI = {
         "ru": "🔍 Точного совпадения нет, возможно, вы искали:",
         "en": "🔍 No exact match. Maybe you meant:",
     },
+    "vol_word": {"kz": "том", "ru": "тома", "en": "vol."},
+    "vol_btn": {"kz": "том", "ru": "Том", "en": "Vol."},
+    "series_volumes": {"kz": "Томдар:", "ru": "Тома:", "en": "Volumes:"},
     "choose": {
         "kz": "👇 Таңдаңыз:",
         "ru": "👇 Выберите:",
@@ -1317,6 +1320,13 @@ _SEARCH_ALIAS_GROUPS = [
     ("хирургия", "surgery", "surgical", "хирург"),
     ("внутренние болезни", "internal medicine", "ішкі аурулар", "пропедевтика"),
     ("история казахстана", "kazakhstan history", "kazakh history", "қазақстан тарихы"),
+    # Авторы: русское написание «на слух» <-> английское. Добавляйте свои строки сюда.
+    ("гайтон", "guyton"),
+    ("грей", "грейс", "gray", "gray's"),
+    ("роббинс", "робинс", "robbins"),
+    ("собота", "соботта", "sobotta"),
+    ("харпер", "harper"),
+    ("каплан", "kaplan"),
 ]
 
 def expand_search_queries(query):
@@ -1400,7 +1410,11 @@ def find_subject_fuzzy(query):
 
 
 async def search_books_multilingual(query, limit=5):
-    """Сначала ищет точные вхождения по языковым вариантам, затем fuzzy-совпадения."""
+    """Точные вхождения по языковым вариантам + нечёткий (фонетический) поиск ВМЕСТЕ.
+
+    Раньше при любом точном совпадении (например «Неттер» в русских названиях) нечёткий
+    поиск не запускался, поэтому книги с английским названием (Frank Netter) не находились.
+    Теперь русская запись «на слух» (Неттер, Нетер) находит и русские, и английские книги."""
     variants = expand_search_queries(query)
     exact = {}
     for variant in variants:
@@ -1414,17 +1428,21 @@ async def search_books_multilingual(query, limit=5):
                     cap = bk.get("caption", "").lower()
                     if q in fname or q in cap:
                         exact[(sc, book_lang, idx)] = (sc, book_lang, idx, bk)
-    if exact:
-        results = list(exact.values())
-        return len(results), results[:limit], False
 
+    # Если точные совпадения уже есть, из нечётких берём только достаточно похожие,
+    # чтобы не засорять выдачу случайными книгами.
+    min_score = 0.9 if exact else 0.0
     fuzzy = {}
     for variant in variants:
-        total, found = await asyncio.to_thread(fuzzy_find_books, variant, limit * 2)
+        _total, found = await asyncio.to_thread(fuzzy_find_books, variant, 300, min_score)
         for sc, book_lang, idx, bk in found:
             fuzzy[(sc, book_lang, idx)] = (sc, book_lang, idx, bk)
-    results = list(fuzzy.values())[:limit]
-    return len(fuzzy), results, bool(results)
+
+    merged = dict(exact)
+    for key, value in fuzzy.items():
+        merged.setdefault(key, value)       # точные совпадения идут первыми
+    results = list(merged.values())
+    return len(results), results[:limit], (not exact) and bool(results)
 
 
 async def send_subject_menu(chat_id, code):
@@ -3859,6 +3877,174 @@ async def get_file_id(message: types.Message):
     file_id = message.photo[-1].file_id
     await message.answer(f"file_id:\n`{file_id}`", parse_mode="Markdown")
 
+
+# =========================
+# ОБЪЕДИНЕНИЕ ТОМОВ В ОДНУ КНОПКУ ПОИСКА
+# «Пищевар Неттер Часть 1 / 2 / 3» -> одна кнопка «Пищевар Неттер — тома 1, 2, 3»
+# =========================
+SEARCH_GROUPS_LIMIT = 15   # сколько кнопок максимум показываем в результатах поиска
+
+
+def _plain_name(fname):
+    return re.sub(r"\.(pdf|djvu|epub)$", "", fname or "", flags=re.I).replace("_", " ").strip()
+
+
+def _series_title(fname):
+    """«Пищевар Неттер Часть 3.pdf» -> «Пищевар Неттер»."""
+    t = _VOL_RE.sub(" ", _plain_name(fname))
+    t = re.sub(r"\s+", " ", t).strip(" .,-–—")
+    return t or _plain_name(fname)
+
+
+def _vol_num(fname):
+    """Номер тома. Подчёркивания заменяем пробелами: в «Патофизиология_2_том_Новицкий.pdf»
+    регулярка иначе не видит «2 том», потому что «_» считается частью слова."""
+    return _volume_number((fname or "").replace("_", " "))
+
+
+def _vol_label(numbers):
+    """[1, 2, 3] -> «1, 2, 3»;  [1..6] -> «1–6»;  [1, 2, 5] -> «1, 2, 5»."""
+    nums = sorted({n for n in numbers if n is not None})
+    if not nums:
+        return ""
+    runs, start, prev = [], nums[0], nums[0]
+    for n in nums[1:]:
+        if n == prev + 1:
+            prev = n
+            continue
+        runs.append((start, prev))
+        start = prev = n
+    runs.append((start, prev))
+    parts = []
+    for a, b in runs:
+        parts.append(f"{a}–{b}" if b - a >= 3 else ", ".join(str(x) for x in range(a, b + 1)))
+    return ", ".join(parts)
+
+
+def _collect_series(lang, base_book):
+    """Все тома той же серии и того же языка (во всех разделах), по порядку номеров."""
+    key, has_vol = _series_key(base_book.get("file_name", ""))
+    if not has_vol or len(key) < 5:
+        return []
+    members = []
+    for sc, langs in BOOKS_DB.items():
+        for idx, bk in enumerate(langs.get(lang, [])):
+            k, hv = _series_key(bk.get("file_name", ""))
+            if hv and k == key:
+                members.append((_vol_num(bk.get("file_name", "")), sc, idx, bk))
+    members.sort(key=lambda m: (m[0] is None, m[0] if m[0] is not None else 0,
+                                -m[3].get("message_id", 0)))
+    return members
+
+
+async def search_book_groups(query, limit=SEARCH_GROUPS_LIMIT):
+    """Поиск, где тома одной серии объединены. Возвращает (всего_групп, группы, is_fuzzy).
+    Группа: {"sc", "lang", "idx", "book", "members": [...]}; members пуст, если книга одна."""
+    _total, books, is_fuzzy = await search_books_multilingual(query, 10 ** 6)
+    groups, seen_series = [], set()
+    for sc, lang, idx, bk in books:
+        key, has_vol = _series_key(bk.get("file_name", ""))
+        if has_vol and len(key) >= 5:
+            if (key, lang) in seen_series:
+                continue
+            members = _collect_series(lang, bk)
+            if len(members) >= 2:
+                seen_series.add((key, lang))
+                _n, msc, midx, mbk = members[0]
+                groups.append({"sc": msc, "lang": lang, "idx": midx, "book": mbk, "members": members})
+                continue
+        groups.append({"sc": sc, "lang": lang, "idx": idx, "book": bk, "members": []})
+    return len(groups), groups[:limit], is_fuzzy
+
+
+def group_button(uid, g):
+    flag = {"rus": "🇷🇺", "kaz": "🇰🇿", "eng": "🇬🇧"}.get(g["lang"], "")
+    if g["members"]:
+        title = _series_title(g["book"].get("file_name", ""))[:30]
+        vols = _vol_label([m[0] for m in g["members"]])
+        label = f"{flag} {title} — {tr(uid, 'vol_word')} {vols}" if vols else f"{flag} {title} ({len(g['members'])})"
+        return InlineKeyboardButton(text=label, callback_data=f"bg_{g['sc']}_{g['lang']}_{g['idx']}")
+    name = _plain_name(g["book"].get("file_name", ""))[:35]
+    return InlineKeyboardButton(text=f"{flag} {name}", callback_data=f"bk_{g['sc']}_{g['lang']}_{g['idx']}")
+
+
+async def _send_cover_card(chat_id, cover_id, post_id, caption, keyboard):
+    """Обложка + подпись + кнопки. Порядок как в карточке одной книги:
+    копия обложки -> пересылка обложки + текст -> пост с книгой -> просто текст."""
+    source_chat = f"@{CHANNEL.lstrip('@')}"
+    if cover_id:
+        try:
+            await bot.copy_message(chat_id=chat_id, from_chat_id=source_chat,
+                                   message_id=int(cover_id), caption=caption, reply_markup=keyboard)
+            return "cover"
+        except Exception as e:
+            logger.warning(f"Обложка серии не скопировалась (пост {cover_id}): {e}")
+            try:
+                await bot.forward_message(chat_id=chat_id, from_chat_id=source_chat, message_id=int(cover_id))
+                await bot.send_message(chat_id=chat_id, text=caption, reply_markup=keyboard)
+                return "cover-forward"
+            except Exception as e2:
+                logger.warning(f"Обложка серии не переслалась (пост {cover_id}): {e2}")
+    # Обложки нет — не выдаём чужую картинку за обложку, показываем текстовую карточку.
+    await bot.send_message(chat_id=chat_id, text=caption, reply_markup=keyboard)
+    return "text"
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("bg_"))
+async def book_group_handler(callback: types.CallbackQuery):
+    uid = callback.from_user.id
+    try:
+        _prefix, rest = callback.data.split("_", 1)
+        sc, lang, idx = rest.rsplit("_", 2)
+        idx = int(idx)
+        base = BOOKS_DB[sc][lang][idx]
+    except (ValueError, KeyError, IndexError):
+        await callback.answer(tr(uid, "book_nf_alert"), show_alert=True)
+        return
+    members = _collect_series(lang, base)
+    if not members:
+        await callback.answer(tr(uid, "book_nf_alert"), show_alert=True)
+        return
+
+    title = _series_title(base.get("file_name", ""))
+    lang_name = {"rus": "🇷🇺 Русский", "kaz": "🇰🇿 Қазақша", "eng": "🇬🇧 English"}.get(lang, lang)
+    subject_name = SUBJECT_NAMES.get(members[0][1], "📚 Другое")
+    vols = _vol_label([m[0] for m in members])
+    caption = (
+        f"╔══════════════════════╗\n"
+        f"  📖 {title[:40]}\n"
+        f"╚══════════════════════╝\n\n"
+        f"📚 {tr(uid, 'card_subject')} {subject_name}\n"
+        f"🌐 {tr(uid, 'card_lang')} {lang_name}\n"
+        f"📑 {tr(uid, 'series_volumes')} {vols}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 @library_adasan"
+    )
+    rows = []
+    for number, _sc, _idx, bk in members:
+        btn_text = (f"📥 {tr(uid, 'vol_btn')} {number}" if number is not None
+                    else f"📥 {_plain_name(bk.get('file_name', ''))[:40]}")
+        rows.append([InlineKeyboardButton(text=btn_text, url=bk["url"])])
+    rows.append([InlineKeyboardButton(text="🏠 Таңдаулар / Меню / Menu", callback_data="go_main_menu")])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
+
+    # Обложка у томов общая (inherit_series_covers); берём первую найденную.
+    cover_id = next((m[3].get("photo_message_id") for m in members if m[3].get("photo_message_id")), None)
+    await _send_cover_card(callback.message.chat.id, cover_id, members[0][3].get("message_id"), caption, keyboard)
+
+    try:
+        first = members[0]
+        add_book_history(uid, first[1], lang, first[2], title[:50], first[3]["url"])
+        record_book_open(first[3]["url"], title[:50], first[1], lang)
+    except Exception as e:
+        logger.warning(f"История серии не записалась: {e}")
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.answer()
+
+
 @dp.message()
 async def search(message: types.Message):
     if not message.from_user or not message.text:
@@ -3954,22 +4140,16 @@ async def search(message: types.Message):
         await send_subject_menu(message.chat.id, subject_code)
         return
 
-    # 3. Поиск в books_db.json: исходный запрос + языковые эквиваленты + fuzzy-поиск.
-    total_found, found_books, is_fuzzy = await search_books_multilingual(text, 5)
+    # 3. Поиск в books_db.json: точные совпадения + русские/английские варианты + fuzzy-поиск.
+    #    Тома одной серии объединяются в одну кнопку.
+    total_found, groups, is_fuzzy = await search_book_groups(text, SEARCH_GROUPS_LIMIT)
 
-    if found_books:
-        results = found_books[:5]
-        keyboard_rows = []
-        for sc, lang, idx, bk in results:
-            name = bk["file_name"].replace(".pdf","").replace(".djvu","").replace("_"," ")[:35]
-            lang_flag = {"rus": "🇷🇺", "kaz": "🇰🇿", "eng": "🇬🇧"}.get(lang, "")
-            keyboard_rows.append([InlineKeyboardButton(
-                text=f"{lang_flag} {name}", callback_data=f"bk_{sc}_{lang}_{idx}"
-            )])
+    if groups:
+        keyboard_rows = [[group_button(message.from_user.id, g)] for g in groups]
         if is_fuzzy:
             head = tr(message.from_user.id, "fuzzy_head")
         else:
-            head = tr(message.from_user.id, "found_n", n=total_found, k=len(results))
+            head = tr(message.from_user.id, "found_n", n=total_found, k=len(groups))
         await message.answer(
             f"{head}\n\n{tr(message.from_user.id, 'choose')}",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
