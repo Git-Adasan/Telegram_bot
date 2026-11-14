@@ -3989,25 +3989,46 @@ def group_button(uid, g):
     return InlineKeyboardButton(text=f"{flag} {name}", callback_data=f"bk_{g['sc']}_{g['lang']}_{g['idx']}")
 
 
-async def _send_cover_card(chat_id, cover_id, post_id, caption, keyboard):
-    """Обложка + подпись + кнопки. Порядок как в карточке одной книги:
-    копия обложки -> пересылка обложки + текст -> пост с книгой -> просто текст."""
+async def _send_cover_card(chat_id, cover_id, post_id, caption, keyboard, show_debug=False):
+    """Обложка + подпись + кнопки. Пробуем по порядку:
+    1) копия фото-поста с подписью и кнопками одним сообщением;
+    2) копия фото-поста без подписи, затем карточка текстом;
+    3) пересылка фото-поста, затем карточка текстом;
+    4) только карточка текстом.
+    Причины неудач пишем в лог, а админу/помощнику ещё и показываем под карточкой."""
     source_chat = f"@{CHANNEL.lstrip('@')}"
-    if cover_id:
+    problems = []
+    if not cover_id:
+        problems.append("у серии нет обложки: photo_message_id пуст в books_db.json")
+    else:
         try:
-            await bot.copy_message(chat_id=chat_id, from_chat_id=source_chat,
-                                   message_id=int(cover_id), caption=caption, reply_markup=keyboard)
+            await bot.copy_message(chat_id=chat_id, from_chat_id=source_chat, message_id=int(cover_id),
+                                   caption=caption, reply_markup=keyboard)
             return "cover"
         except Exception as e:
-            logger.warning(f"Обложка серии не скопировалась (пост {cover_id}): {e}")
+            problems.append(f"copy_message(пост {cover_id}) с подписью: {e}")
+            logger.warning(f"Обложка серии: copy с подписью не удался (пост {cover_id}): {e}")
+        try:
+            await bot.copy_message(chat_id=chat_id, from_chat_id=source_chat, message_id=int(cover_id))
             try:
-                await bot.forward_message(chat_id=chat_id, from_chat_id=source_chat, message_id=int(cover_id))
                 await bot.send_message(chat_id=chat_id, text=caption, reply_markup=keyboard)
-                return "cover-forward"
-            except Exception as e2:
-                logger.warning(f"Обложка серии не переслалась (пост {cover_id}): {e2}")
-    # Обложки нет — не выдаём чужую картинку за обложку, показываем текстовую карточку.
-    await bot.send_message(chat_id=chat_id, text=caption, reply_markup=keyboard)
+            except Exception as e:
+                logger.warning(f"Карточка серии после обложки не отправилась: {e}")
+            return "cover+text"
+        except Exception as e:
+            problems.append(f"copy_message(пост {cover_id}) без подписи: {e}")
+            logger.warning(f"Обложка серии: copy без подписи не удался (пост {cover_id}): {e}")
+        try:
+            await bot.forward_message(chat_id=chat_id, from_chat_id=source_chat, message_id=int(cover_id))
+            await bot.send_message(chat_id=chat_id, text=caption, reply_markup=keyboard)
+            return "cover-forward"
+        except Exception as e:
+            problems.append(f"forward_message(пост {cover_id}): {e}")
+            logger.warning(f"Обложка серии: пересылка не удалась (пост {cover_id}): {e}")
+    text = caption
+    if show_debug and problems:
+        text += "\n\n⚠️ Только админу — почему нет фото:\n" + "\n".join(f"• {x[:220]}" for x in problems)
+    await bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
     return "text"
 
 
@@ -4052,7 +4073,8 @@ async def book_group_handler(callback: types.CallbackQuery):
 
     # Обложка у томов общая (inherit_series_covers); берём первую найденную.
     cover_id = next((m[3].get("photo_message_id") for m in members if m[3].get("photo_message_id")), None)
-    await _send_cover_card(callback.message.chat.id, cover_id, members[0][3].get("message_id"), caption, keyboard)
+    await _send_cover_card(callback.message.chat.id, cover_id, members[0][3].get("message_id"),
+                           caption, keyboard, show_debug=is_staff(uid))
 
     try:
         first = members[0]
