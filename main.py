@@ -4102,6 +4102,7 @@ async def send_popular(message: types.Message):
         )
         return
 
+    status = await message.answer("⏳ Подождите, загружаю обложки и создаю карточку популярных книг…")
     try:
         # First run may fetch real cover photos from the existing Telegram channel.
         try:
@@ -4114,9 +4115,16 @@ async def send_popular(message: types.Message):
             types.BufferedInputFile(png, filename="adasan_library_top5.png"),
             caption="📚 Adasan Library · TOP-5\n📊 Статистика за всё время",
         )
+        try:
+            await status.delete()
+        except Exception:
+            pass
     except Exception as e:
         logger.exception("Не удалось создать изображение рейтинга: %s", e)
-        await message.answer("Не удалось сформировать изображение рейтинга. Попробуйте ещё раз позже.")
+        try:
+            await status.edit_text("⚠️ Не удалось создать карточку рейтинга. Попробуйте ещё раз позже.")
+        except Exception:
+            await message.answer("⚠️ Не удалось создать карточку рейтинга. Попробуйте ещё раз позже.")
 
     buttons = []
     for e in entries:
@@ -5242,17 +5250,19 @@ async def backup_loop():
 async def backup_command(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         await message.answer("❌ Рұқсат жоқ!"); return
+    status = await message.answer("⏳ Создаю резервную копию базы данных…")
     try:
         sent = await make_backup(force=True)
     except Exception as e:
-        await message.answer(f"❌ Не удалось: {e}"); return
-    await message.answer("✅ Копия отправлена и закреплена." if sent else
-                         "ℹ️ В базе пока нет данных — копировать нечего.")
+        await status.edit_text(f"❌ Не удалось создать копию: {e}"); return
+    await status.edit_text("✅ Копия отправлена и закреплена." if sent else
+                           "ℹ️ В базе пока нет данных — копировать нечего.")
 
 
 async def _restore_command_impl(message: types.Message, doc):
     if not doc:
         await message.answer("Перешлите zip-копию боту с подписью /restore или ответьте на неё командой /restore."); return
+    status = await message.answer("⏳ Скачиваю архив и восстанавливаю базу. Подождите…")
     try:
         buf = io.BytesIO()
         await bot.download(doc, destination=buf)
@@ -5260,10 +5270,10 @@ async def _restore_command_impl(message: types.Message, doc):
             raise ValueError("файл не является ZIP-архивом")
         c = await asyncio.to_thread(_restore_from_zip, buf.getvalue())
     except Exception as e:
-        await message.answer(f"❌ Не восстановлено: {e}"); return
+        await status.edit_text(f"❌ Не восстановлено: {e}"); return
     _backup_state["blocked"] = False
-    await message.answer(f"♻️ Готово: {c['users']} польз., {c['favorites']} избранных, {c['opens']} открытий.\n"
-                         "Старая база сохранена как adasan.db.before_restore.")
+    await status.edit_text(f"♻️ Готово: {c['users']} польз., {c['favorites']} избранных, {c['opens']} открытий.\n"
+                           "Старая база сохранена как adasan.db.before_restore.")
 
 
 @dp.message(Command("restore"))
