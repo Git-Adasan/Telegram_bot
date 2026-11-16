@@ -734,7 +734,9 @@ class BanAndFloodMiddleware(BaseMiddleware):
                     pass
                 return
         else:  # message
-            if not getattr(event, "document", None) and is_flood(user_id):
+            text = getattr(event, "text", None) or ""
+            is_command = text.startswith("/")
+            if not getattr(event, "document", None) and not is_command and is_flood(user_id):
                 return
         return await handler(event, data)
 
@@ -2442,6 +2444,8 @@ def admin_keyboard(user_id=None):
         [KeyboardButton(text="👥 Пользователи"), KeyboardButton(text="📊 Статистика")],
         [KeyboardButton(text="🚫 Баны")],
     ]
+    if user_id is not None and is_owner(user_id):
+        rows.append([KeyboardButton(text="🛡 Помощники")])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 @dp.message(Command("admin"))
@@ -2483,6 +2487,10 @@ async def admin_bans_callback(callback: types.CallbackQuery):
     else:
         await callback.message.answer("Отправьте: /unban ID")
     await callback.answer()
+
+@dp.message(F.text == "🛡 Помощники", F.from_user.id.func(is_owner))
+async def admins_button(message: types.Message):
+    await _show_helpers(message)
 
 HELPER_COMMANDS = [
     ("start", "Начало / Бастау / Start"),
