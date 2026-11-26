@@ -13,7 +13,9 @@
 .git/**
 __pycache__/
 *.py[cod]
-*_image_originals_backup*/
-*_backup*/
+# Только архивы копий и файлы до восстановления.
+# НЕ писать "*_backup*": Docker отбрасывает "/" в конце, и правило задевает handlers_backup.py.
+adasan_backup_*.zip
+*.before_restore
 *.bak
 *.tmp
