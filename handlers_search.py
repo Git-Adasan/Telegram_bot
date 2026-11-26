@@ -11,8 +11,14 @@ from database import ban_user, is_staff, log_stat, record_miss, set_wish
 from middlewares import find_profanity, spam_tracker
 from search_engine import find_subject_fuzzy
 from subjects import SUBJECTS, _norm_q
-from texts import tr
+from texts import tr, user_lang
 from keyboards import menu_button
+
+import time
+
+MAT_WARNING_TTL = 24 * 3600      # повторный мат в течение суток после предупреждения — бан
+
+_mat_warned = {}                 # user_id -> время предупреждения
 
 
 # =========================
@@ -25,13 +31,15 @@ async def search(message: types.Message):
     if not message.from_user or not message.text:
         return
     text = message.text.strip()
-    if len(text) > 200:
-        await message.answer("🔎 Слишком длинный запрос. Напишите название короче (до 200 символов).")
-        return
     user_id = message.from_user.id
+    if len(text) > 200:
+        await message.answer(tr(user_id, "too_long"))
+        return
 
-    # Игнорируем неизвестные команды (начинаются с /)
+    # Неизвестная команда: раньше бот молчал, и казалось, что он сломался — теперь подсказываем /help
     if text.startswith("/"):
+        if message.chat.type == "private":
+            await message.answer(tr(user_id, "unknown_cmd"))
         return
 
     # Reply-кнопки предметов могут приходить на любом из трёх языков.
@@ -39,14 +47,20 @@ async def search(message: types.Message):
     for button_text, code in SUBJECTS.items():
         if _norm_q(button_text) == normalized_button:
             log_stat(message.from_user.id, code, text)
-            await send_subject_menu(message.chat.id, code)
+            await send_subject_menu(message.chat.id, code, uid=user_id)
             return
 
     # =============================
     # АВТОБАН ЗА МАТЫ
     # =============================
     mat = find_profanity(text) if not is_staff(user_id) else None
+    if mat and time.time() - _mat_warned.get(user_id, 0) > MAT_WARNING_TTL:
+        # Первый раз — только предупреждение (раньше банили сразу, в том числе за случайное слово).
+        _mat_warned[user_id] = time.time()
+        await message.answer(tr(user_id, "mat_warning"))
+        return
     if mat:
+        _mat_warned.pop(user_id, None)
         ban_user(message.from_user.id, f"Автобан: мат ({mat})")
         spam_tracker.pop(message.from_user.id, None)
         await message.answer(
@@ -77,7 +91,7 @@ async def search(message: types.Message):
     subject_code = find_subject_fuzzy(text)
     if subject_code:
         log_stat(message.from_user.id, subject_code, text)
-        await send_subject_menu(message.chat.id, subject_code)
+        await send_subject_menu(message.chat.id, subject_code, uid=user_id)
         return
 
     # 3. Поиск в books_db.json: точные совпадения + русские/английские варианты + fuzzy-поиск.
@@ -86,6 +100,7 @@ async def search(message: types.Message):
 
     if groups:
         keyboard_rows = [[group_button(message.from_user.id, g)] for g in groups]
+        keyboard_rows.append([menu_button(user_lang(user_id))])
         if is_fuzzy:
             head = tr(message.from_user.id, "fuzzy_head")
         else:
@@ -102,7 +117,7 @@ async def search(message: types.Message):
     if miss_id:
         rows.append([InlineKeyboardButton(text=tr(user_id, "wish_btn"), callback_data=f"wish_{miss_id}")])
     rows.append([InlineKeyboardButton(text=tr(user_id, "btn_admin"), url=ADMIN_URL)])
-    rows.append([menu_button()])
+    rows.append([menu_button(user_lang(user_id))])
     await message.answer(
         tr(user_id, "not_found", admin=ADMIN_NAME),
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)

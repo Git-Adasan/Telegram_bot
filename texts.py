@@ -1,6 +1,9 @@
 """Тексты интерфейса на трёх языках (UI), функция tr() и приветствие."""
 
+import html
+
 from database import get_lang
+from texts_ui import HELP_TEXTS, NEW_UI
 
 
 # =========================
@@ -120,101 +123,43 @@ UI = {
     },
 }
 
-def tr(user_id, key, **kw):
-    """Текст по языку пользователя. Если язык неизвестен — русский."""
+def user_lang(user_id):
+    """Язык интерфейса пользователя: kz / ru / en (если неизвестен — русский)."""
     lang = get_lang(user_id) if user_id else "ru"
-    if lang not in ("kz", "ru", "en"):
-        lang = "ru"
-    text = UI[key][lang]
+    return lang if lang in ("kz", "ru", "en") else "ru"
+
+
+def tl(ui_lang, key, /, **kw):
+    """Текст по коду языка (kz / ru / en). Параметры позиционные: в текстах есть подстановка {lang}."""
+    item = UI[key]
+    text = item.get(ui_lang) or item.get("ru")
     return text.format(**kw) if kw else text
 
-# =========================
-# ТЕКСТЫ ПРИВЕТСТВИЯ
-# =========================
-WELCOME_TEXTS = {
-    "ru": (
-        "╔══════════════════════╗\n"
-        "   👋 Привет, {name}!\n"
-        "╚══════════════════════╝\n\n"
-        "🏥 Добро пожаловать в Adasan Medical Library!\n\n"
-        "📖 Я помогу вам найти:\n"
-        "    📚 Медицинские книги\n"
-        "    📋 Силлабусы\n"
-        "    🎓 Лекции\n"
-        "    🔬 Препараты\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "👇 Выберите предмет или напишите\n"
-        "📌 @library_adasan"
-    ),
-    "kz": (
-        "╔══════════════════════╗\n"
-        "   👋 Сәлем, {name}!\n"
-        "╚══════════════════════╝\n\n"
-        "🏥 Adasan Medical Library-ға қош келдіңіз!\n\n"
-        "📖 Мен сізге табуға көмектесемін:\n"
-        "    📚 Медициналық кітаптар\n"
-        "    📋 Силлабустар\n"
-        "    🎓 Лекциялар\n"
-        "    🔬 Препараттар\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "👇 Пәнді таңдаңыз немесе жазыңыз\n"
-        "📌 @library_adasan"
-    ),
-    "en": (
-        "╔══════════════════════╗\n"
-        "   👋 Hello, {name}!\n"
-        "╚══════════════════════╝\n\n"
-        "🏥 Welcome to Adasan Medical Library!\n\n"
-        "📖 I can help you find:\n"
-        "    📚 Medical books\n"
-        "    📋 Syllabuses\n"
-        "    🎓 Lectures\n"
-        "    🔬 Preparations\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "👇 Choose a subject or type\n"
-        "📌 @library_adasan"
-    ),
-}
+
+def tr(user_id, key, /, **kw):
+    """Текст по языку пользователя. Если язык неизвестен — русский."""
+    return tl(user_lang(user_id), key, **kw)
 
 
-# =========================
-# СПРАВКА (/help)
-# =========================
-HELP_TEXTS = {
-    "kz": (
-        "ℹ️ Боттың қолданылуы\n\n"
-        "🔎 Кітаптың немесе пәннің атын жазыңыз — қатесі болса да табамын.\n"
-        "📚 Төмендегі батырмалардан пәнді таңдаңыз: кітаптар, силлабус, дәрістер.\n\n"
-        "🔥 /popular — ең көп ашылған кітаптар\n"
-        "⭐ /favorites — таңдаған кітаптарыңыз\n"
-        "📖 /history — соңғы ашылған кітаптар\n"
-        "📤 /upload — өз материалыңызды жіберу\n"
-        "🌐 /lang — тілді ауыстыру\n"
-        "🏠 /menu — басты мәзір\n\n"
-        "📌 Арна: @library_adasan"
-    ),
-    "ru": (
-        "ℹ️ Как пользоваться ботом\n\n"
-        "🔎 Напишите название книги или предмета — найду, даже если есть опечатки.\n"
-        "📚 Выберите предмет кнопками внизу: книги, силлабусы, лекции.\n\n"
-        "🔥 /popular — самые открываемые книги\n"
-        "⭐ /favorites — ваша подборка\n"
-        "📖 /history — последние открытые книги\n"
-        "📤 /upload — прислать свой материал\n"
-        "🌐 /lang — сменить язык\n"
-        "🏠 /menu — главное меню\n\n"
-        "📌 Канал: @library_adasan"
-    ),
-    "en": (
-        "ℹ️ How to use the bot\n\n"
-        "🔎 Type a book or subject name — I will find it, even with typos.\n"
-        "📚 Pick a subject with the buttons below: books, syllabi, lectures.\n\n"
-        "🔥 /popular — most opened books\n"
-        "⭐ /favorites — your collection\n"
-        "📖 /history — recently opened books\n"
-        "📤 /upload — send your own material\n"
-        "🌐 /lang — change language\n"
-        "🏠 /menu — main menu\n\n"
-        "📌 Channel: @library_adasan"
-    ),
-}
+def esc(value):
+    """Экранирует текст для parse_mode=HTML (имена людей, названия файлов)."""
+    return html.escape(str(value or ""), quote=False)
+
+
+LANG_NAMES = {"rus": "🇷🇺 Русский", "kaz": "🇰🇿 Қазақша", "eng": "🇬🇧 English"}
+
+LANG_FLAGS = {"rus": "🇷🇺", "kaz": "🇰🇿", "eng": "🇬🇧"}
+
+UI.update(NEW_UI)
+
+# Старое имя оставлено для совместимости (раньше приветствие было обычным текстом в рамке).
+WELCOME_TEXTS = {lang: UI["welcome"][lang] for lang in ("kz", "ru", "en")}
+
+
+def welcome_text(lang, first_name):
+    """Приветствие (HTML) с безопасно подставленным именем."""
+    return tl(lang, "welcome", name=esc(first_name or "👋"))
+
+
+def help_text(lang, bot_username):
+    return HELP_TEXTS.get(lang, HELP_TEXTS["ru"]).replace("{bot}", esc(bot_username or "bot"))

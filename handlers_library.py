@@ -16,9 +16,9 @@ from core import ADMIN_ID, CHANNEL, bot, dp, logger
 from database import add_book_history, add_submission, count_pending_by_user, get_lang, record_book_open, set_submission_status, set_vote
 from keyboards import main_menu_keyboard, menu_button
 from search_engine import fuzzy_find_books
-from series import series_info
+from series import _plain_name, series_info
 from subjects import SUBJECT_NAMES
-from texts import tr
+from texts import tr, user_lang
 from uploads import LANG_CAPTION, LANG_LABELS, MAX_PENDING_PER_USER, MAX_UPLOAD_BYTES, SUBJECT_HASHTAGS, UPLOAD_COOLDOWN_SECONDS, UPLOAD_EXT, _notify_user, _parse_sub, _upload_last_time, _upload_state, start_upload, submission_admin_kb
 from views import send_popular
 
@@ -45,7 +45,8 @@ async def popular_button(message: types.Message):
 @dp.callback_query(lambda c: c.data and c.data.startswith("rate_"))
 async def rate_handler(callback: types.CallbackQuery):
     try:
-        _, direction, subject_code, lang, idx_raw = callback.data.split("_")
+        direction, rest = callback.data[5:].split("_", 1)              # rate_up_… / rate_dn_…
+        subject_code, lang, idx_raw = rest.rsplit("_", 2)
         idx = int(idx_raw)
         book = BOOKS_DB[subject_code][lang][idx]
     except (ValueError, KeyError, IndexError):
@@ -56,14 +57,15 @@ async def rate_handler(callback: types.CallbackQuery):
     try:
         series = series_info(book.get("message_id"))
         updated_keyboard = (_series_card_keyboard(series, callback.from_user.id) if series
-                            else book_card_keyboard(subject_code, lang, idx, book["url"], callback.from_user.id))
+                            else book_card_keyboard(subject_code, lang, idx, book["url"], callback.from_user.id,
+                                                    title=_plain_name(book.get("file_name", ""))))
         await callback.message.edit_reply_markup(reply_markup=updated_keyboard)
     except Exception as edit_error:
         logger.debug("Не удалось обновить кнопки оценки: %s", edit_error)
     if result == 0:
-        await callback.answer("Дауыс алынды / Голос убран")
+        await callback.answer({"kz": "Дауыс алынды", "ru": "Голос убран", "en": "Vote removed"}[user_lang(callback.from_user.id)])
     else:
-        await callback.answer("Рахмет! / Спасибо! 🙌")
+        await callback.answer({"kz": "Рахмет! 🙌", "ru": "Спасибо! 🙌", "en": "Thanks! 🙌"}[user_lang(callback.from_user.id)])
 
 @dp.message(Command("upload"))
 async def upload_command(message: types.Message):

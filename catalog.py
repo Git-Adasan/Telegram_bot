@@ -279,8 +279,10 @@ _refresh_catalog_names(BOOKS_DB)
 
 def catalog_keyboard():
     rows, row = [], []
-    for label, code in SUBJECTS.items():
-        row.append(InlineKeyboardButton(text=SUBJECT_NAMES.get(code, label), callback_data=f"subject_{code}"))
+    # В SUBJECTS лежат надписи кнопок на ТРЁХ языках — раньше каждый предмет попадал в каталог 2–3 раза.
+    unique_codes = list(dict.fromkeys(SUBJECTS.values()))
+    for code in unique_codes:
+        row.append(InlineKeyboardButton(text=SUBJECT_NAMES.get(code, code), callback_data=f"subject_{code}"))
         if len(row) == 2:
             rows.append(row); row = []
     if row:

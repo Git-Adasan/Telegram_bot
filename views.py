@@ -9,45 +9,49 @@ from aiogram.types import InlineKeyboardButton
 from aiogram.types import InlineKeyboardMarkup
 
 from books import BOOKS_DB, find_book_by_url
-from core import API_HASH, API_ID, BASE_DIR, CHANNEL, DB_PATH, _telethon_lock, logger
+from core import API_HASH, API_ID, BASE_DIR, CHANNEL, DB_PATH, TELETHON_READY, _telethon_lock, logger
 from database import _mid_from_url, get_favorites, get_top_books, get_votes
 from series import series_info
 from keyboards import menu_button
+from texts import LANG_FLAGS, tl, user_lang
+
+
+def favorites_keyboard(favs, lang):
+    """Строка на книгу: «📖 Название» (открыть) и «🗑» (удалить). Внизу — меню."""
+    rows = []
+    for favorite_id, sc, lg, bi, bn, bu in favs:
+        rows.append([
+            InlineKeyboardButton(text=f"{LANG_FLAGS.get(lg, '📖')} {bn[:34]}", callback_data=f"bm_{_mid_from_url(bu)}"),
+            InlineKeyboardButton(text="🗑", callback_data=f"fav_del_id_{favorite_id}"),
+        ])
+    rows.append([menu_button(lang)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def send_favorites(message: types.Message, uid=None):
     """Показывает личную подборку пользователя, а не общий TOP библиотеки.
     uid нужен, когда вызываем из inline-кнопки: там message.from_user — это бот, а не пользователь."""
-    favs = get_favorites(uid or message.from_user.id)
+    uid = uid or message.from_user.id
+    lang = user_lang(uid)
+    favs = get_favorites(uid)
     if not favs:
-        await message.answer(
-            "⭐ Мои любимые книги\n\nПока список пуст. Откройте карточку книги и нажмите ⭐ «В избранное».",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [menu_button()]
-            ])
-        )
+        await message.answer(tl(lang, "fav_empty"), parse_mode="HTML",
+                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[menu_button(lang)]]))
         return
 
     # Запись: id, subject_code, lang, book_idx, book_name, book_url
     entries = [{"title": row[4]} for row in favs]
-    rows = []
-    for favorite_id, sc, lg, bi, bn, bu in favs:
-        rows.append([
-            InlineKeyboardButton(text=f"📖 {bn[:32]}", callback_data=f"bm_{_mid_from_url(bu)}"),
-            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"fav_del_id_{favorite_id}"),
-        ])
-    rows.append([menu_button()])
-    keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
+    keyboard = favorites_keyboard(favs, lang)
+    caption = tl(lang, "fav_caption", n=len(favs))
     try:
         png = await asyncio.to_thread(render_favorites_image, entries)
         await message.answer_photo(
             types.BufferedInputFile(png, filename="my_favorite_books.png"),
-            caption=f"⭐ Мои любимые книги · {len(favs)}",
-            reply_markup=keyboard
+            caption=caption, parse_mode="HTML", reply_markup=keyboard,
         )
     except Exception as exc:
         logger.warning("Не удалось создать карточку избранного: %s", exc)
-        await message.answer(f"⭐ Мои любимые книги · {len(favs)}", reply_markup=keyboard)
+        await message.answer(caption, parse_mode="HTML", reply_markup=keyboard)
 
 # ---------- Популярное ----------
 def get_top_entries(limit=5):
@@ -139,8 +143,8 @@ async def _cache_covers_impl(entries):
 
 async def cache_popular_book_covers(entries):
     """Обёртка: не мешает /update_books (общая сессия) и не вешает /popular дольше 45 секунд."""
-    if _telethon_lock.locked():
-        return                                  # сейчас идёт обновление каталога — обложки в следующий раз
+    if not TELETHON_READY or _telethon_lock.locked():
+        return                                  # нет ключей Telethon или сейчас идёт обновление каталога — обложки в следующий раз
     async with _telethon_lock:
         await asyncio.wait_for(_cache_covers_impl(entries), timeout=45)
 
