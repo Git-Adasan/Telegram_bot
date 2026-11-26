@@ -7,6 +7,7 @@ from admin_tools import apply_helper_commands
 from backup import auto_restore_if_fresh, backup_loop, make_backup
 from core import ADMIN_ID, bot, dp, logger
 from database import compact_stats, helper_ids, prune_misses
+from keyboards import BOT_INFO
 
 # Модули с обработчиками подключаются В ЭТОМ ПОРЯДКЕ: aiogram отдаёт сообщение первому подошедшему обработчику.
 import middlewares  # noqa: F401
@@ -16,6 +17,7 @@ import handlers_catalog  # noqa: F401
 import handlers_library  # noqa: F401
 import handlers_top5  # noqa: F401
 import handlers_backup  # noqa: F401
+import handlers_extra  # noqa: F401   — профиль, случайная книга, отзыв, inline; ДО поиска
 import handlers_search  # noqa: F401
 
 
@@ -42,16 +44,19 @@ async def main():
 
     # Меню команд (кнопка «/» в Telegram). Админ видит те же команды + свои.
     user_commands = [
-        BotCommand(command="start",     description="Начало / Бастау / Start"),
-        BotCommand(command="menu",      description="🏠 Главное меню / Басты мәзір"),
-        BotCommand(command="popular",   description="🔥 Популярное / Танымал"),
-        BotCommand(command="favorites", description="⭐ Избранное / Таңдауларым"),
-        BotCommand(command="history",   description="📖 История книг"),
-        BotCommand(command="top5",      description="🏆 Топ-5 книг"),
-        BotCommand(command="catalog",   description="📂 Все разделы"),
+        BotCommand(command="start",     description="🚀 Бастау / Начало / Start"),
+        BotCommand(command="menu",      description="🏠 Басты мәзір / Главное меню"),
+        BotCommand(command="popular",   description="🔥 Танымал / Популярное"),
+        BotCommand(command="random",    description="🎲 Кездейсоқ кітап / Случайная книга"),
+        BotCommand(command="favorites", description="⭐ Таңдаулылар / Избранное"),
+        BotCommand(command="history",   description="📖 Тарих / История"),
+        BotCommand(command="profile",   description="👤 Профиль"),
+        BotCommand(command="top5",      description="🏆 Топ-5 кітап / книг"),
+        BotCommand(command="catalog",   description="📂 Барлық бөлімдер / Все разделы"),
         BotCommand(command="upload",    description="📤 Материал жіберу / Отправить материал"),
-        BotCommand(command="lang",      description="🌐 Язык / Тіл / Language"),
-        BotCommand(command="help",      description="ℹ️ Помощь / Көмек / Help"),
+        BotCommand(command="feedback",  description="💬 Админге жазу / Написать админу"),
+        BotCommand(command="lang",      description="🌐 Тіл / Язык / Language"),
+        BotCommand(command="help",      description="ℹ️ Көмек / Помощь / Help"),
     ]
     admin_commands = user_commands + [
         BotCommand(command="top5_set",     description="🏆 Задать топ-5 предмета"),
@@ -65,6 +70,16 @@ async def main():
         BotCommand(command="missing",      description="🔎 Что ищут и не находят"),
         BotCommand(command="compact",      description="🧹 Сжать старую статистику"),
     ]
+    # Узнаём имя бота и включён ли inline-режим (для кнопок «Поделиться» и «Искать в любом чате»)
+    try:
+        me = await bot.get_me()
+        BOT_INFO["username"] = me.username or ""
+        BOT_INFO["inline"] = bool(me.supports_inline_queries)
+        if not BOT_INFO["inline"]:
+            logger.info("Inline-режим выключен. Включите в @BotFather: /setinline — появятся «Поделиться» и поиск в любом чате.")
+    except Exception as e:
+        logger.warning(f"get_me не удался: {e}")
+
     await bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
     await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=ADMIN_ID))
 

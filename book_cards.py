@@ -9,66 +9,64 @@ from aiogram.types import InlineKeyboardMarkup
 
 from books import BOOKS_DB, _DYN_NAMES
 from core import BASE_DIR, CHANNEL, bot, logger
-from database import add_book_history, get_lang, get_votes, record_book_open
-from keyboards import menu_button, subject_inline
+from database import add_book_history, get_votes, record_book_open
+from keyboards import BOT_INFO, back_menu_row, menu_button, subject_inline
 from search_engine import search_books_multilingual
 from series import _plain_name, series_index, series_info
-from subjects import SUBJECT_NAMES, SUBJECT_PHOTOS
-from texts import tr
+from subjects import SUBJECT_PHOTOS, subject_title
+from texts import LANG_NAMES, esc, tl, tr, user_lang
 from top5 import _top5_codes
 
+PER_PAGE = 8
 
-async def send_subject_menu(chat_id, code):
+
+def subject_book_count(code):
+    return sum(len(v) for v in BOOKS_DB.get(code, {}).values())
+
+
+async def send_subject_menu(chat_id, code, uid=None):
+    """Меню предмета на языке пользователя. В личке chat_id совпадает с id пользователя."""
+    lang = user_lang(uid or chat_id)
+    total = subject_book_count(code)
     # Раздел из хэштегов открывается сразу списком языков (без силлабусов и препаратов)
     if code in _DYN_NAMES:
-        total = sum(len(v) for v in BOOKS_DB.get(code, {}).values())
         await bot.send_message(
             chat_id,
-            f"{_DYN_NAMES[code]}\n\n📖 Барлығы: {total} кітап\n\n"
-            "👇 Тілді таңдаңыз / Выберите язык / Choose language:",
-            reply_markup=lang_inline(code, chat_id)
+            tl(lang, "books_choose_lang", name=esc(_DYN_NAMES[code]), n=total),
+            parse_mode="HTML",
+            reply_markup=lang_inline(code, uid or chat_id),
         )
         return
-    name = SUBJECT_NAMES.get(code, "📚 Другое")
+    caption = tl(lang, "subject_menu", name=esc(subject_title(code, lang)), n=total)
     photo_file = SUBJECT_PHOTOS.get(code)
     photo_path = os.path.join(BASE_DIR, photo_file) if photo_file else None
     if photo_path and os.path.exists(photo_path):
-        await bot.send_photo(chat_id=chat_id, photo=FSInputFile(photo_path),
-                             caption=f"{name}\n\nВыберите раздел / Бөлімді таңдаңыз:",
-                             reply_markup=subject_inline(code))
+        await bot.send_photo(chat_id=chat_id, photo=FSInputFile(photo_path), caption=caption,
+                             parse_mode="HTML", reply_markup=subject_inline(code, lang))
     else:
-        await bot.send_message(chat_id=chat_id,
-                               text=f"{name}\n\nВыберите раздел / Бөлімді таңдаңыз:",
-                               reply_markup=subject_inline(code))
+        await bot.send_message(chat_id=chat_id, text=caption, parse_mode="HTML",
+                               reply_markup=subject_inline(code, lang))
 
 # =========================
 # INLINE — язык книг из BOOKS_DB
 # =========================
 def lang_inline(subject_code, uid=None):
-    by_lang = {}
+    lang_ui = user_lang(uid)
     langs = BOOKS_DB.get(subject_code, {})
-    if langs.get("rus"):
-        by_lang["rus"] = InlineKeyboardButton(
-            text=f"🇷🇺 Русский ({len(_list_entries(subject_code, 'rus'))})", callback_data=f"bl_{subject_code}_rus")
-    if langs.get("kaz"):
-        by_lang["kaz"] = InlineKeyboardButton(
-            text=f"🇰🇿 Қазақша ({len(_list_entries(subject_code, 'kaz'))})", callback_data=f"bl_{subject_code}_kaz")
-    if langs.get("eng"):
-        by_lang["eng"] = InlineKeyboardButton(
-            text=f"🇬🇧 English ({len(_list_entries(subject_code, 'eng'))})", callback_data=f"bl_{subject_code}_eng")
     order = ["rus", "kaz", "eng"]
-    if uid and get_lang(uid) == "en":
+    if lang_ui == "en":
         order = ["eng", "rus", "kaz"]      # английский интерфейс: English первым, остальные доступны
-    buttons = [by_lang[l] for l in order if l in by_lang]
+    elif lang_ui == "kz":
+        order = ["kaz", "rus", "eng"]      # казахский интерфейс: казахские книги первыми
+    buttons = [
+        InlineKeyboardButton(text=f"{LANG_NAMES[lg]} · {len(_list_entries(subject_code, lg))}",
+                             callback_data=f"bl_{subject_code}_{lg}")
+        for lg in order if langs.get(lg)
+    ]
     rows = [[b] for b in buttons]
-    rows.append([InlineKeyboardButton(text="⬅ Артқа / Назад / Back", callback_data=f"subject_{subject_code}")])
-    rows.append([menu_button()])
-    if subject_code in _DYN_NAMES:                       # «Назад» ведёт в каталог, а не в меню предмета
-        rows = [[
-            InlineKeyboardButton(text=b.text, callback_data="catalog_open")
-            if b.callback_data == f"subject_{subject_code}" else b
-            for b in row
-        ] for row in rows]
+    # «Назад» из раздела-хэштега ведёт в каталог, а не в меню предмета
+    back_to = "catalog_open" if subject_code in _DYN_NAMES else f"subject_{subject_code}"
+    rows.append(back_menu_row(lang_ui, back_to))
     if subject_code in _top5_codes():                    # «Топ-5» — только там, где список уже составлен
         rows.insert(0, [InlineKeyboardButton(text="🏆 Топ-5 / Үздік 5", callback_data=f"t5_{subject_code}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -88,11 +86,25 @@ def _list_entries(subject_code, lang):
         out.append((idx, b, sid))
     return out
 
+def page_count(subject_code, lang):
+    return max(1, -(-len(_list_entries(subject_code, lang)) // PER_PAGE))
+
+def booklist_header(uid, subject_code, lang, page=0):
+    """Заголовок списка книг: предмет · язык · сколько книг · страница."""
+    ui = user_lang(uid)
+    n = len(_list_entries(subject_code, lang))
+    pages = page_count(subject_code, lang)
+    page = min(max(page, 0), pages - 1)
+    page_txt = tl(ui, "list_page", p=page + 1, t=pages) if pages > 1 else ""
+    return tl(ui, "list_header_html", name=esc(subject_title(subject_code, ui)),
+              lang=LANG_NAMES.get(lang, lang), n=n, page=page_txt)
+
 def booklist_inline(subject_code, lang, page=0, uid=None):
     entries = _list_entries(subject_code, lang)
-    per_page = 8
-    start = page * per_page
-    end = start + per_page
+    pages = page_count(subject_code, lang)
+    page = min(max(page, 0), pages - 1)                 # старая кнопка после /update_books — не выходим за границы
+    start = page * PER_PAGE
+    end = start + PER_PAGE
     rows = []
     for idx, book, sid in entries[start:end]:
         info = series_info(book.get("message_id")) if sid else None
@@ -101,32 +113,90 @@ def booklist_inline(subject_code, lang, page=0, uid=None):
             rows.append([group_button(uid, {"sc": first["sc"], "lang": first["lang"], "idx": first["idx"],
                                             "book": first["book"], "series": info})])
             continue
-        name = book["file_name"].replace(".pdf","").replace(".djvu","").replace("_"," ")[:40]
+        name = _plain_name(book.get("file_name", ""))[:40]
         rows.append([InlineKeyboardButton(
             text=f"📖 {name}", callback_data=f"bk_{subject_code}_{lang}_{idx}")])
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(text="⬅", callback_data=f"bp_{subject_code}_{lang}_{page-1}"))
-    if end < len(entries):
-        nav.append(InlineKeyboardButton(text="➡", callback_data=f"bp_{subject_code}_{lang}_{page+1}"))
-    if nav:
-        rows.append(nav)
-    rows.append([InlineKeyboardButton(text="⬅ Артқа / Назад / Back", callback_data=f"books_{subject_code}")])
-    rows.append([menu_button()])
+    if pages > 1:
+        # Навигация всегда из трёх кнопок: ◀️ | 2/5 | ▶️ — видно, где ты находишься
+        rows.append([
+            InlineKeyboardButton(text="◀️" if page > 0 else "·",
+                                 callback_data=f"bp_{subject_code}_{lang}_{page-1}" if page > 0 else "noop"),
+            InlineKeyboardButton(text=f"{page + 1}/{pages}", callback_data="noop"),
+            InlineKeyboardButton(text="▶️" if end < len(entries) else "·",
+                                 callback_data=f"bp_{subject_code}_{lang}_{page+1}" if end < len(entries) else "noop"),
+        ])
+    rows.append(back_menu_row(user_lang(uid), f"books_{subject_code}"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-def book_card_keyboard(subject_code, lang, idx, url, uid=None):
+def share_button(uid, title):
+    """«📤 Поделиться» — открывает выбор чата с inline-запросом по названию книги."""
+    if not BOT_INFO["inline"] or not title:
+        return None
+    return InlineKeyboardButton(text=tr(uid, "btn_share"), switch_inline_query=title[:60])
+
+def book_card_keyboard(subject_code, lang, idx, url, uid=None, title=None, extra_rows=None):
     likes, dislikes = get_votes(url)
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📥 Жүктеу / Скачать / Download", url=url)],
-        [InlineKeyboardButton(text=tr(uid, "fav_add_btn") if uid else "⭐ Таңдаулыға қосу", callback_data=f"fav_add_{subject_code}_{lang}_{idx}")],
-        [
-            InlineKeyboardButton(text=f"👍 {likes}", callback_data=f"rate_up_{subject_code}_{lang}_{idx}"),
-            InlineKeyboardButton(text=f"👎 {dislikes}", callback_data=f"rate_dn_{subject_code}_{lang}_{idx}"),
-        ],
-        [InlineKeyboardButton(text="⬅ Артқа / Назад / Back", callback_data=f"bl_{subject_code}_{lang}")],
-        [menu_button()],
+    ui = user_lang(uid)
+    rows = [[InlineKeyboardButton(text=tl(ui, "btn_download"), url=url)]]
+    second = [InlineKeyboardButton(text=tl(ui, "fav_add_btn"), callback_data=f"fav_add_{subject_code}_{lang}_{idx}")]
+    share = share_button(uid, title)
+    if share:
+        second.append(share)
+    rows.append(second)
+    rows.append([
+        InlineKeyboardButton(text=f"👍 {likes}", callback_data=f"rate_up_{subject_code}_{lang}_{idx}"),
+        InlineKeyboardButton(text=f"👎 {dislikes}", callback_data=f"rate_dn_{subject_code}_{lang}_{idx}"),
     ])
+    rows += extra_rows or []
+    rows.append(back_menu_row(ui, f"bl_{subject_code}_{lang}"))
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def book_card_caption(uid, subject_code, lang, title, extra=""):
+    ui = user_lang(uid)
+    return tl(ui, "book_card", title=esc(title[:40]), subject=esc(subject_title(subject_code, ui)),
+              lang=LANG_NAMES.get(lang, lang), extra=extra)
+
+async def send_book_card(chat_id, uid, subject_code, lang, idx, head=None, extra_rows=None):
+    """Карточка одной книги: настоящая обложка из канала (если есть) + описание + кнопки.
+    Возвращает False, если книги с таким индексом нет. Многотомные книги — отдельной карточкой серии."""
+    books_list = BOOKS_DB.get(subject_code, {}).get(lang, [])
+    if not 0 <= idx < len(books_list):
+        return False
+    book = books_list[idx]
+    series = series_info(book.get("message_id"))
+    if series:
+        await send_series_card(chat_id, uid, series, head=head)
+        return True
+    name = _plain_name(book.get("file_name", "")) or "📖"
+    caption = book_card_caption(uid, subject_code, lang, name)
+    if head:
+        caption = f"{head}\n\n{caption}"
+    keyboard = book_card_keyboard(subject_code, lang, idx, book["url"], uid, title=name, extra_rows=extra_rows)
+    source_chat = f"@{CHANNEL.lstrip('@')}"
+    sent = False
+    cover_id = book.get("photo_message_id")
+    if cover_id:
+        try:
+            await bot.copy_message(chat_id=chat_id, from_chat_id=source_chat, message_id=int(cover_id),
+                                   caption=caption, parse_mode="HTML", reply_markup=keyboard)
+            sent = True
+        except Exception as e:
+            logger.warning(f"Обложка не скопировалась (пост {cover_id}): {e}")
+    if not sent and book.get("message_id"):
+        # Обложки нет — присылаем сам пост с файлом (книгу можно открыть прямо в чате).
+        try:
+            await bot.copy_message(chat_id=chat_id, from_chat_id=source_chat, message_id=int(book["message_id"]),
+                                   caption=caption, parse_mode="HTML", reply_markup=keyboard)
+            sent = True
+        except Exception as e:
+            logger.warning(f"Пост книги не скопировался ({book.get('message_id')}): {e}")
+    if not sent:
+        # Не выдаём тематическую картинку за обложку: если ничего не вышло — аккуратная текстовая карточка.
+        await bot.send_message(chat_id=chat_id, text=caption, parse_mode="HTML", reply_markup=keyboard)
+    short = name[:50]
+    add_book_history(uid, subject_code, lang, idx, short, book["url"])
+    record_book_open(book["url"], short, subject_code, lang)
+    return True
 
 # =========================
 # ГРУППЫ / ОБСУЖДЕНИЯ КАНАЛА — авто-ответ книгой
@@ -262,69 +332,64 @@ async def _send_cover_card(chat_id, cover_id, post_id, caption, keyboard):
     source_chat = f"@{CHANNEL.lstrip('@')}"
     if cover_id:
         try:
-            await bot.copy_message(chat_id=chat_id, from_chat_id=source_chat,
-                                   message_id=int(cover_id), caption=caption, reply_markup=keyboard)
+            await bot.copy_message(chat_id=chat_id, from_chat_id=source_chat, message_id=int(cover_id),
+                                   caption=caption, parse_mode="HTML", reply_markup=keyboard)
             return "cover"
         except Exception as e:
             logger.warning(f"Обложка серии не скопировалась (пост {cover_id}): {e}")
             try:
                 await bot.forward_message(chat_id=chat_id, from_chat_id=source_chat, message_id=int(cover_id))
-                await bot.send_message(chat_id=chat_id, text=caption, reply_markup=keyboard)
+                await bot.send_message(chat_id=chat_id, text=caption, parse_mode="HTML", reply_markup=keyboard)
                 return "cover-forward"
             except Exception as e2:
                 logger.warning(f"Обложка серии не переслалась (пост {cover_id}): {e2}")
     # Обложки нет — не выдаём чужую картинку за обложку, показываем текстовую карточку.
-    await bot.send_message(chat_id=chat_id, text=caption, reply_markup=keyboard)
+    await bot.send_message(chat_id=chat_id, text=caption, parse_mode="HTML", reply_markup=keyboard)
     return "text"
 
 def _series_card_keyboard(info, uid):
     """Многотомная книга = ОДНА книга: кнопки скачивания по томам, а ⭐ и 👍/👎 — один раз на всю серию
     (хранятся на первом томе, так же как открытия и история)."""
+    ui = user_lang(uid)
     rows = []
     for member in info["members"]:
         book = member["book"]
         vol = member.get("vol")
-        tail = _sx_tail(member["title"], info.get("title") or "")
+        tail_txt = _sx_tail(member["title"], info.get("title") or "")
         if vol is not None:
-            label = f"📥 {tr(uid, 'vol_btn')} {vol}" + (f" · {tail}" if tail else "")
+            label = f"📥 {tl(ui, 'vol_btn')} {vol}" + (f" · {tail_txt}" if tail_txt else "")
         else:
             label = f"📥 {_plain_name(book.get('file_name', ''))}"
         rows.append([InlineKeyboardButton(text=label[:56], url=book["url"])])
     first = info["members"][0]
     sc, lang, idx = first["sc"], first["lang"], first["idx"]
     likes, dislikes = get_votes(first["book"]["url"])
-    rows.append([InlineKeyboardButton(text=tr(uid, "fav_add_btn"), callback_data=f"fav_add_{sc}_{lang}_{idx}")])
+    second = [InlineKeyboardButton(text=tl(ui, "fav_add_btn"), callback_data=f"fav_add_{sc}_{lang}_{idx}")]
+    share = share_button(uid, info.get("title") or "")
+    if share:
+        second.append(share)
+    rows.append(second)
     rows.append([
         InlineKeyboardButton(text=f"👍 {likes}", callback_data=f"rate_up_{sc}_{lang}_{idx}"),
         InlineKeyboardButton(text=f"👎 {dislikes}", callback_data=f"rate_dn_{sc}_{lang}_{idx}"),
     ])
-    rows.append([menu_button()])
+    rows.append(back_menu_row(ui, f"bl_{sc}_{lang}"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-async def _send_series_card(callback: types.CallbackQuery, info):
+async def send_series_card(chat_id, uid, info, head=None):
     """Одна карточка на всю серию: обложка один раз + кнопка скачивания каждого тома по порядку."""
-    uid = callback.from_user.id
     members = info["members"]
     title = info["title"] or ""
-    lang_name = {"rus": "🇷🇺 Русский", "kaz": "🇰🇿 Қазақша", "eng": "🇬🇧 English"}.get(info["lang"], info["lang"])
-    subject_name = SUBJECT_NAMES.get(info["subject"], "📚 Другое")
     vols = _vol_label([m["vol"] for m in members])
-    heading = title[:40] or f"{tr(uid, 'vol_word').capitalize()} {vols}".strip()
-    caption = (
-        f"╔══════════════════════╗\n"
-        f"  📖 {heading}\n"
-        f"╚══════════════════════╝\n\n"
-        f"📚 {tr(uid, 'card_subject')} {subject_name}\n"
-        f"🌐 {tr(uid, 'card_lang')} {lang_name}\n"
-        + (f"📑 {tr(uid, 'series_volumes')} {vols}\n" if vols else "")
-        + f"\n━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📌 @library_adasan"
-    )
+    heading = title or f"{tr(uid, 'vol_word').capitalize()} {vols}".strip()
+    extra = f"\n📑 {tr(uid, 'series_volumes')} {vols}" if vols else ""
+    caption = book_card_caption(uid, info["subject"], info["lang"], heading, extra=extra)
+    if head:
+        caption = f"{head}\n\n{caption}"
     keyboard = _series_card_keyboard(info, uid)
 
     # Обложка у всех томов общая; берём первую найденную (propagate_series_covers уже раздал её томам).
-    await _send_cover_card(callback.message.chat.id, info["cover"], members[0]["book"].get("message_id"),
-                           caption, keyboard)
+    await _send_cover_card(chat_id, info["cover"], members[0]["book"].get("message_id"), caption, keyboard)
     try:
         first = members[0]
         name = (title or _plain_name(first["book"].get("file_name", "")))[:50]
@@ -332,6 +397,10 @@ async def _send_series_card(callback: types.CallbackQuery, info):
         record_book_open(first["book"]["url"], name, first["sc"], first["lang"])
     except Exception as e:
         logger.warning(f"История серии не записалась: {e}")
+
+async def _send_series_card(callback: types.CallbackQuery, info):
+    """Обёртка для кнопок: показывает серию и убирает сообщение со списком."""
+    await send_series_card(callback.message.chat.id, callback.from_user.id, info)
     try:
         await callback.message.delete()
     except Exception:

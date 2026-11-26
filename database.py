@@ -358,16 +358,54 @@ def get_broadcast_user_ids():
     return rows, total - len(rows)
 
 def add_user(user_id, username, first_name):
+    """Добавляет пользователя. Возвращает True, если это НОВЫЙ пользователь (его ещё не было в базе).
+    Для старых обновляет username / имя — раньше они навсегда оставались такими, как при первом /start."""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute(
         "INSERT OR IGNORE INTO users (user_id, username, first_name, lang, joined_at) VALUES (?,?,?,?,?)",
         (user_id, username, first_name, "ru", datetime.now().isoformat())
     )
+    is_new = c.rowcount > 0
+    if not is_new:
+        c.execute("UPDATE users SET username=?, first_name=? WHERE user_id=?", (username, first_name, user_id))
     c.execute(_BLOCKED_DDL)
     c.execute("DELETE FROM bot_blocked WHERE user_id=?", (user_id,))   # написал /start — значит снова доступен
     conn.commit()
     conn.close()
+    return is_new
+
+
+def clear_book_history(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("DELETE FROM book_history WHERE user_id=?", (user_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_user_profile(user_id):
+    """Личная статистика для /profile."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(_ARCHIVE_DDL)
+        conn.execute(_MISS_DDL)
+        conn.execute(_WISH_DDL)
+        one = lambda sql: conn.execute(sql, (user_id,)).fetchone()[0] or 0          # noqa: E731
+        row = conn.execute("SELECT joined_at FROM users WHERE user_id=?", (user_id,)).fetchone()
+        return {
+            "joined_at": row[0] if row else None,
+            "opened": one("SELECT COUNT(*) FROM book_history WHERE user_id=?"),
+            "favs": one("SELECT COUNT(*) FROM favorites WHERE user_id=?"),
+            "votes": one("SELECT COUNT(*) FROM book_ratings WHERE user_id=?"),
+            "searches": one("SELECT COUNT(*) FROM stats WHERE user_id=?")
+                        + one("SELECT COALESCE(SUM(n),0) FROM stats_archive WHERE user_id=?"),
+            "wishes": one("""SELECT COUNT(*) FROM book_wishes w JOIN missed_queries m ON m.id = w.miss_id
+                             WHERE w.user_id=? AND w.wished=1 AND m.resolved_at IS NULL"""),
+        }
+    finally:
+        conn.close()
 
 def log_stat(user_id, subject, query=""):
     conn = sqlite3.connect(DB_PATH)

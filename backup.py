@@ -19,12 +19,15 @@ from top5 import TOP5_PATH
 
 BACKUP_INTERVAL_H = float(os.getenv("BACKUP_INTERVAL_HOURS", "3"))
 
-_backup_state = {"hash": None, "blocked": False}
+# floor — счётчики последней закреплённой копии. Копию с МЕНЬШИМ числом открытий или пользователей
+# бот не отправляет и не закрепляет: раньше после перезапуска на Render бот поднимался со старой
+# базой из GitHub, бэкапил её и закреплял ПОВЕРХ хорошей копии — открытия книг «пропадали».
+_backup_state = {"hash": None, "blocked": False, "floor": None, "warned": False}
 
 _backup_lock = asyncio.Lock()
 
-def _db_counts():
-    conn = sqlite3.connect(DB_PATH)
+def _db_counts(path=None):
+    conn = sqlite3.connect(path or DB_PATH)
     try:
         def one(sql):
             try:
@@ -100,6 +103,24 @@ async def make_backup(force=False):
             return False
         if not force and digest == _backup_state["hash"]:
             return False                                       # ничего не изменилось
+        floor = _backup_state["floor"]
+        if not force and floor and _is_poorer(counts, floor):
+            # В базе меньше данных, чем в закреплённой копии — значит, бот поднялся со старой базой.
+            # Хорошую копию НЕ затираем, предупреждаем владельца один раз.
+            logger.error(f"Копия не отправлена: в базе меньше данных ({counts}), чем в закреплённой ({floor})")
+            if not _backup_state["warned"]:
+                _backup_state["warned"] = True
+                try:
+                    await bot.send_message(
+                        ADMIN_ID,
+                        f"⚠️ В базе сейчас меньше данных, чем в закреплённой копии:\n"
+                        f"сейчас {counts['users']} польз. · {counts['opens']} открытий, "
+                        f"в копии {floor['users']} польз. · {floor['opens']} открытий.\n\n"
+                        "Хорошую копию я НЕ трогаю. Чтобы вернуть данные, перешлите её боту с подписью /restore. "
+                        "Если данные уменьшились специально — /backup сделает копию принудительно.")
+                except Exception:
+                    pass
+            return False
         name = f"adasan_backup_{datetime.now():%Y%m%d_%H%M}.zip"
         msg = await bot.send_document(
             ADMIN_ID, types.BufferedInputFile(data, filename=name), disable_notification=True,
@@ -112,7 +133,31 @@ async def make_backup(force=False):
             logger.warning(f"Не удалось закрепить копию: {e}")
         _backup_state["hash"] = digest
         _backup_state["blocked"] = False
+        _backup_state["floor"] = counts
+        _backup_state["warned"] = False
         return True
+
+
+def _is_poorer(counts, ref):
+    """В базе меньше пользователей или открытий книг, чем в ref? (эти числа в нормальной работе только растут)"""
+    return counts["users"] < ref["users"] or counts["opens"] < ref["opens"]
+
+
+def _counts_of_zip(data):
+    """Счётчики базы внутри zip-копии (без замены текущей базы)."""
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        db_bytes = z.read("adasan.db")
+    fd, tmp = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    try:
+        with open(tmp, "wb") as f:
+            f.write(db_bytes)
+        return _db_counts(tmp)
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 def _restore_from_zip(data):
     """Проверяет zip и подменяет базу и top5.json. Возвращает счётчики. Исключение — если архив негодный."""
@@ -158,21 +203,31 @@ def _restore_from_zip(data):
     return _db_counts()
 
 async def auto_restore_if_fresh():
-    """Запуск с пустой базой (диск обнулился): тянем закреплённую копию из чата с владельцем."""
+    """При запуске сравниваем базу с закреплённой копией и восстанавливаем копию, если в ней БОЛЬШЕ данных.
+
+    Раньше восстанавливали только ПУСТУЮ базу. Но на Render после перезапуска диск сбрасывается к тому,
+    что лежит в репозитории, — а там старая непустая adasan.db. Бот считал её нормальной, не восстанавливал
+    копию и потом закреплял бэкап старой базы поверх хорошего. Отсюда «пропадающие» открытия книг."""
+    local = _db_counts()
     try:
-        if _db_counts()["users"] > 0:
-            return
         chat = await bot.get_chat(ADMIN_ID)
         doc = chat.pinned_message.document if getattr(chat, "pinned_message", None) else None
         if not doc or not (doc.file_name or "").startswith("adasan_backup_"):
-            logger.info("База пустая, закреплённой копии нет — это первый запуск.")
+            logger.info("Закреплённой копии нет — работаем с текущей базой.")
             return
         buf = io.BytesIO()
         await bot.download(doc, destination=buf)
-        c = await asyncio.to_thread(_restore_from_zip, buf.getvalue())
-        logger.info(f"♻️ База восстановлена из копии: {c}")
-        await bot.send_message(ADMIN_ID, f"♻️ После перезапуска база восстановлена из копии: "
-                                         f"{c['users']} польз., {c['favorites']} избранных, {c['opens']} открытий.")
+        data = buf.getvalue()
+        pinned = await asyncio.to_thread(_counts_of_zip, data)
+        _backup_state["floor"] = pinned                        # копии беднее этой не закрепляем
+        if not _is_poorer(local, pinned):
+            logger.info(f"База актуальна ({local}), закреплённая копия: {pinned}")
+            return
+        c = await asyncio.to_thread(_restore_from_zip, data)
+        logger.info(f"♻️ База восстановлена из копии: было {local}, стало {c}")
+        await bot.send_message(ADMIN_ID, f"♻️ После перезапуска база восстановлена из закреплённой копии: "
+                                         f"{c['users']} польз., {c['favorites']} избранных, {c['opens']} открытий "
+                                         f"(до восстановления было {local['users']} польз., {local['opens']} открытий).")
     except Exception as e:
         _backup_state["blocked"] = True                        # не затираем старую копию пустой базой
         logger.error(f"Автовосстановление не удалось: {e}")
@@ -204,5 +259,7 @@ async def _restore_command_impl(message: types.Message, doc):
     except Exception as e:
         await message.answer(f"❌ Не восстановлено: {e}"); return
     _backup_state["blocked"] = False
+    _backup_state["floor"] = c                                 # дальше копии не беднее восстановленной
+    _backup_state["warned"] = False
     await message.answer(f"♻️ Готово: {c['users']} польз., {c['favorites']} избранных, {c['opens']} открытий.\n"
                          "Старая база сохранена как adasan.db.before_restore.")

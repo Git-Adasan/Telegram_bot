@@ -28,22 +28,28 @@ load_dotenv(ENV_PATH, override=False)
 if os.name != "nt":
     os.umask(0o077)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 
-API_ID_RAW = os.getenv("API_ID")
+if not BOT_TOKEN:
+    raise RuntimeError(f"BOT_TOKEN не задан! Проверь файл: {ENV_PATH}")
 
-API_HASH = os.getenv("API_HASH")
+API_ID_RAW = (os.getenv("API_ID") or "").strip()
 
-if not API_ID_RAW or not API_HASH:
-    raise RuntimeError(
-        f"API_ID или API_HASH не найдены. Проверь файл: {ENV_PATH}. "
-        "В нём должны быть строки API_ID=... и API_HASH=... (имя файла именно .env, не .env.txt)."
-    )
+API_HASH = (os.getenv("API_HASH") or "").strip()
 
-try:
-    API_ID = int(API_ID_RAW.strip())
-except ValueError as exc:
-    raise RuntimeError("API_ID должен быть числом. Проверь строку API_ID в .env") from exc
+# API_ID / API_HASH нужны ТОЛЬКО для /update_books и загрузки обложек (Telethon).
+# Раньше без них бот вообще не запускался — теперь просто пишем предупреждение.
+API_ID = 0
+if API_ID_RAW:
+    try:
+        API_ID = int(API_ID_RAW)
+    except ValueError as exc:
+        raise RuntimeError("API_ID должен быть числом. Проверь строку API_ID в .env") from exc
+
+TELETHON_READY = bool(API_ID and API_HASH)
+
+if not TELETHON_READY:
+    logger.warning("API_ID/API_HASH не заданы: /update_books и обложки в «Популярном» недоступны, остальное работает.")
 
 # =========================
 # ADMIN
@@ -67,9 +73,6 @@ CHANNEL     = "@library_adasan"
 # БД
 # =========================
 DB_PATH = os.getenv("DB_PATH") or os.path.join(BASE_DIR, "adasan.db")
-
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN не задан!")
 
 bot = Bot(token=BOT_TOKEN)
 

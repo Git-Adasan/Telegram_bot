@@ -15,7 +15,7 @@ from aiogram.types import InlineKeyboardMarkup
 from admin_tools import _show_helpers, admin_keyboard, apply_helper_commands, clear_helper_commands, send_banlist, send_broadcast_one
 from books import BOOKS_DB, _load_sort_overrides, _save_sort_overrides, replace_books_db
 from catalog import _refresh_catalog_names, _sort_card, _sort_move, _sort_send_files, _sort_skipped, apply_sort_overrides, build_dynamic_catalog
-from core import ADMIN_ID, API_HASH, API_ID, BASE_DIR, CHANNEL, DB_PATH, _telethon_lock, bot, dp
+from core import ADMIN_ID, API_HASH, API_ID, BASE_DIR, CHANNEL, DB_PATH, TELETHON_READY, _telethon_lock, bot, dp
 from database import _ENV_HELPERS, add_helper, ban_user, compact_stats, count_bot_blocked, get_broadcast_user_ids, get_detailed_stats, get_extra_stats, get_lang, get_monthly_activity, get_users_list, helper_ids, is_owner, is_staff, remove_helper, resolve_user, top_misses, unban_user, vacuum_db
 from keyboards import main_menu_keyboard
 from search_engine import _is_english_filename
@@ -408,6 +408,9 @@ async def update_books_command(message: types.Message):
         await message.answer("❌ Рұқсат жоқ!")
         return
 
+    if not TELETHON_READY:
+        await message.answer("⚠️ В .env не заданы API_ID и API_HASH — без них бот не может прочитать канал.")
+        return
     if _telethon_lock.locked():
         await message.answer("⏳ Обновление уже идёт, подождите.")
         return

@@ -1,0 +1,19 @@
+# Credentials and authenticated Telegram sessions
+.env
+.env.*
+!.env.example
+*.session
+*.session-journal
+
+# User database and generated runtime files
+*.db
+*.sqlite
+*.sqlite3
+sort_overrides.json
+*.tmp
+
+# Python and local backup files
+__pycache__/
+*.py[cod]
+*_image_originals_backup*/
+*_backup*/

@@ -156,3 +156,26 @@ def find_subject(query):
             if len(q) >= 4 and (q in t or t in q):
                 return code
     return best_code
+
+
+# =========================
+# НАЗВАНИЯ ПРЕДМЕТОВ НА ЯЗЫКЕ ИНТЕРФЕЙСА
+# =========================
+SUBJECT_NAMES_I18N = {
+    "ru": {
+        "ishki": "🏥 Внутренние болезни", "patfiz": "🔥 Патофизиология", "patanat": "🔭 Патанатомия",
+        "toanat": "🗺 Топографическая анатомия", "tarih": "📜 История Казахстана",
+    },
+    "en": {
+        "gistologiya": "🔬 Histology", "anatomiya": "🦴 Anatomy", "biohimiya": "🧪 Biochemistry",
+        "fiziologiya": "⚡ Physiology", "ishki": "🏥 Internal Medicine", "patfiz": "🔥 Pathophysiology",
+        "patanat": "🔭 Pathoanatomy", "toanat": "🗺 Topographic Anatomy", "farmakologiya": "💊 Pharmacology",
+        "mikrobiologiya": "🦠 Microbiology", "genetika": "🧬 Genetics", "biofizika": "⚗️ Biophysics",
+        "tarih": "📜 Kazakhstan History", "hirurgiya": "✂️ Surgery",
+    },
+}
+
+
+def subject_title(code, lang="kz"):
+    """Название предмета на языке пользователя (для разделов из хэштегов — как в канале)."""
+    return SUBJECT_NAMES_I18N.get(lang, {}).get(code) or SUBJECT_NAMES.get(code, "📚 Другое")

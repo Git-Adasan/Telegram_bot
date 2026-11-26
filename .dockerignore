@@ -1,0 +1,19 @@
+# Never put credentials or authenticated Telegram sessions into an image.
+.env
+.env.*
+!.env.example
+*.session
+*.session-journal
+*.db
+*.sqlite
+*.sqlite3
+
+# Local backups, caches, and repository metadata.
+.git
+.git/**
+__pycache__/
+*.py[cod]
+*_image_originals_backup*/
+*_backup*/
+*.bak
+*.tmp

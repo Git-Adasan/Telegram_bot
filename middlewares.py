@@ -19,6 +19,11 @@ _last_message_time = defaultdict(float)
 
 _last_callback_time = defaultdict(float)
 
+# Раньше было 5 сек для сообщений и 2 сек для кнопок: человек нажимал две кнопки подряд,
+# и вторая молча терялась — казалось, что бот «завис». Теперь защищаемся только от настоящего спама.
+FLOOD_MESSAGE_SECONDS = 1.0
+FLOOD_CALLBACK_SECONDS = 0.6
+
 def _prune(d):
     if len(d) > 20000:                 # не даём словарям расти бесконечно
         cutoff = time.time() - 60
@@ -28,7 +33,7 @@ def _prune(d):
 def is_flood(user_id: int) -> bool:
     now = time.time()
     _prune(_last_message_time)
-    if now - _last_message_time[user_id] < 5:
+    if now - _last_message_time[user_id] < FLOOD_MESSAGE_SECONDS:
         return True
     _last_message_time[user_id] = now
     return False
@@ -36,7 +41,7 @@ def is_flood(user_id: int) -> bool:
 def is_flood_callback(user_id: int) -> bool:
     now = time.time()
     _prune(_last_callback_time)
-    if now - _last_callback_time[user_id] < 2:
+    if now - _last_callback_time[user_id] < FLOOD_CALLBACK_SECONDS:
         return True
     _last_callback_time[user_id] = now
     return False

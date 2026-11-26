@@ -9,17 +9,70 @@ from aiogram.types import InlineKeyboardButton
 from aiogram.types import InlineKeyboardMarkup
 
 from buttons import is_button
-from book_cards import _list_entries, _send_series_card, book_card_keyboard, booklist_inline, lang_inline, send_subject_menu
+from book_cards import (booklist_header, booklist_inline, lang_inline, send_book_card, send_subject_menu,
+                        subject_book_count)
 from books import BOOKS_DB, _find_by_message_id
 from catalog import send_catalog
-from core import BASE_DIR, CHANNEL, bot, dp, logger
-from database import _mid_from_url, add_book_history, add_favorite, add_user, get_book_history, get_favorites, get_lang, record_book_open, remove_favorite_by_id, save_lang
-from keyboards import anat_video_inline, coming_soon_inline, lang_select_keyboard, main_menu_keyboard, menu_button, start_inline, subscribe_keyboard
+from core import BASE_DIR, bot, dp, logger
+from database import (_mid_from_url, add_favorite, add_user, clear_book_history, get_book_history, get_favorites,
+                      get_lang, remove_favorite_by_id, save_lang)
+from keyboards import (BOT_INFO, CHANNEL_URL, anat_video_inline, back_menu_row, coming_soon_inline,
+                       lang_select_keyboard, main_menu_keyboard, menu_button, start_inline, subscribe_keyboard)
 from middlewares import check_subscription
-from series import series_info
-from subjects import SUBJECTS, SUBJECT_NAMES, SUBJECT_PHOTOS
-from texts import HELP_TEXTS, WELCOME_TEXTS, tr
+from series import _plain_name
+from subjects import SUBJECTS, SUBJECT_PHOTOS, subject_title
+from texts import LANG_FLAGS, esc, help_text, tl, tr, user_lang, welcome_text
 from views import render_favorites_image, send_favorites, send_popular
+
+LOGO = os.path.join(BASE_DIR, "adasan.jpg")
+
+CHOOSE_LANG_TEXT = "🌐 <b>Тілді таңдаңыз</b>\nВыберите язык · Choose language"
+
+
+# =========================
+# ОБЩИЕ ПОМОЩНИКИ
+# =========================
+async def _safe_delete(message):
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
+async def _edit(message, text, keyboard):
+    """Меняет подпись фото или текст сообщения (смотря что это за сообщение). HTML-разметка."""
+    try:
+        if message.photo or message.document:
+            await message.edit_caption(caption=text, parse_mode="HTML", reply_markup=keyboard)
+        else:
+            await message.edit_text(text=text, parse_mode="HTML", reply_markup=keyboard)
+        return True
+    except Exception as e:
+        if "message is not modified" in str(e).lower():
+            return True
+        logger.debug("Не удалось изменить сообщение: %s", e)
+        return False
+
+
+async def send_welcome(chat_id, user, with_keyboard=False):
+    """Главный экран: логотип + приветствие + кнопки. with_keyboard — заодно обновить нижнее меню."""
+    lang = user_lang(user.id)
+    await bot.send_photo(chat_id=chat_id, photo=FSInputFile(LOGO), caption=welcome_text(lang, user.first_name),
+                         parse_mode="HTML", reply_markup=start_inline(lang))
+    if with_keyboard:
+        await bot.send_message(chat_id, tl(lang, "keyboard_ready"), reply_markup=main_menu_keyboard(lang))
+
+
+async def ask_language(chat_id):
+    await bot.send_photo(chat_id=chat_id, photo=FSInputFile(LOGO), caption=CHOOSE_LANG_TEXT,
+                         parse_mode="HTML", reply_markup=lang_select_keyboard())
+
+
+def _int(value, default=None):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 # =========================
@@ -27,704 +80,402 @@ from views import render_favorites_image, send_favorites, send_popular
 # =========================
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    add_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-    is_subscribed = await check_subscription(message.from_user.id)
-    if not is_subscribed:
+    user = message.from_user
+    is_new = add_user(user.id, user.username, user.first_name)
+    if not await check_subscription(user.id):
         await message.answer_photo(
-            photo=FSInputFile(os.path.join(BASE_DIR, "adasan.jpg")),
-            caption=(
-                "👋 Сәлем!\n\n"
-                "🔒 Ботты пайдалану үшін\n"
-                "біздің каналға жазылу керек!\n\n"
-                "👇 Төмендегі батырманы басыңыз:"
-            ),
-            reply_markup=subscribe_keyboard()
+            photo=FSInputFile(LOGO),
+            caption=("👋 <b>Сәлем! Привет! Hello!</b>\n\n"
+                     "🔒 Ботты пайдалану үшін арнаға жазылыңыз.\n"
+                     "Чтобы пользоваться ботом, подпишитесь на канал.\n"
+                     "Subscribe to the channel to use the bot.\n\n"
+                     "👇"),
+            parse_mode="HTML",
+            reply_markup=subscribe_keyboard(),
         )
         return
-    await message.answer_photo(
-        photo=FSInputFile(os.path.join(BASE_DIR, "adasan.jpg")),
-        caption="🌐 Тілді таңдаңыз\nВыберите язык\nChoose language:",
-        reply_markup=lang_select_keyboard()
-    )
+    if message.chat.type != "private":
+        await send_welcome(message.chat.id, user)
+        return
+    # Новичок выбирает язык. Раньше язык спрашивали при КАЖДОМ /start — теперь сразу открываем меню.
+    if is_new:
+        await ask_language(message.chat.id)
+    else:
+        await send_welcome(message.chat.id, user, with_keyboard=True)
+
 
 @dp.message(Command("menu"))
 @dp.message(is_button("menu"))
 async def menu_command(message: types.Message):
-    lang = get_lang(message.from_user.id)
-    welcome = WELCOME_TEXTS.get(lang, WELCOME_TEXTS["kz"]).format(name=message.from_user.first_name)
-    await message.answer_photo(
-        photo=FSInputFile(os.path.join(BASE_DIR, "adasan.jpg")),
-        caption=welcome,
-        reply_markup=start_inline(lang)
-    )
+    await send_welcome(message.chat.id, message.from_user)
+
 
 @dp.message(Command("lang"))
 @dp.message(is_button("lang"))
 async def lang_command(message: types.Message):
     """Смена языка без /start (не нужно заново проходить проверку подписки)."""
-    await message.answer("🌐 Тілді таңдаңыз\nВыберите язык\nChoose language:", reply_markup=lang_select_keyboard())
+    await message.answer(CHOOSE_LANG_TEXT, parse_mode="HTML", reply_markup=lang_select_keyboard())
+
 
 @dp.message(Command("help"))
+@dp.message(is_button("help"))
 async def help_command(message: types.Message):
-    lang = get_lang(message.from_user.id)
+    lang = user_lang(message.from_user.id)
     await message.answer(
-        HELP_TEXTS.get(lang, HELP_TEXTS["kz"]),
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[menu_button()]])
+        help_text(lang, BOT_INFO["username"]),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[menu_button(lang)]]),
     )
 
-@dp.message(Command("chanel"))
+
+@dp.message(Command("channel", "chanel"))
 async def channel(message: types.Message):
+    lang = user_lang(message.from_user.id)
     await message.answer(
-        "📌 Біздің кітапхана каналы:\n\n"
-        "👉 @library_adasan\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "Барлық кітаптар мен материалдар сонда! 📚",
+        "📌 <b>Adasan Library</b>\n\n👉 @library_adasan\n\n"
+        + {"kz": "Барлық кітаптар мен материалдар сонда! 📚",
+           "ru": "Все книги и материалы — там! 📚",
+           "en": "All books and materials are there! 📚"}[lang],
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📌 Каналға өту", url="https://t.me/library_adasan")],
-        ])
+            [InlineKeyboardButton(text=tl(lang, "btn_channel"), url=CHANNEL_URL)],
+        ]),
     )
+
 
 @dp.message(Command("favorites", "fav"))
+@dp.message(is_button("favorites"))
 async def favorites_command(message: types.Message):
     await send_favorites(message)
 
-@dp.message(is_button("favorites"))
-async def favorites_button(message: types.Message):
-    await send_favorites(message)
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("fav_del_id_"))
 async def fav_del_handler(callback: types.CallbackQuery):
-    try:
-        favorite_id = int(callback.data.rsplit("_", 1)[1])
-    except (ValueError, IndexError):
-        await callback.answer("Не удалось определить книгу.", show_alert=True)
+    uid = callback.from_user.id
+    lang = user_lang(uid)
+    favorite_id = _int(callback.data.rsplit("_", 1)[-1])
+    if favorite_id is None or not any(row[0] == favorite_id for row in get_favorites(uid)):
+        await callback.answer(tl(lang, "fav_stale"), show_alert=True)
         return
-    before = get_favorites(callback.from_user.id)
-    if not any(row[0] == favorite_id for row in before):
-        await callback.answer("Книга уже удалена или список устарел. Откройте избранное заново.", show_alert=True)
-        return
-    remove_favorite_by_id(callback.from_user.id, favorite_id)
-    await callback.answer("🗑 Удалено из любимых книг.")
-    favs = get_favorites(callback.from_user.id)
+    remove_favorite_by_id(uid, favorite_id)
+    await callback.answer(tl(lang, "fav_removed"))
+    favs = get_favorites(uid)
     if not favs:
-        try:
-            await callback.message.edit_caption(
-                caption="⭐ Мои любимые книги\n\nСписок пока пуст.",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [menu_button()]
-                ])
-            )
-        except Exception:
-            try:
-                await callback.message.delete()
-            except Exception:
-                pass
-            await callback.message.answer("⭐ Мои любимые книги\n\nСписок пока пуст.")
+        if not await _edit(callback.message, tl(lang, "fav_empty"),
+                           InlineKeyboardMarkup(inline_keyboard=[[menu_button(lang)]])):
+            await _safe_delete(callback.message)
+            await callback.message.answer(tl(lang, "fav_empty"), parse_mode="HTML")
         return
 
-    entries = [{"title": row[4]} for row in favs]
-    rows = []
-    for fav_id, sc, lg, bi, bn, bu in favs:
-        rows.append([
-            InlineKeyboardButton(text=f"📖 {bn[:32]}", callback_data=f"bm_{_mid_from_url(bu)}"),
-            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"fav_del_id_{fav_id}"),
-        ])
-    rows.append([menu_button()])
-    keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
+    from views import favorites_keyboard                      # одна клавиатура для списка и после удаления
+    keyboard = favorites_keyboard(favs, lang)
+    caption = tl(lang, "fav_caption", n=len(favs))
     try:
-        png = await asyncio.to_thread(render_favorites_image, entries)
-        media = types.InputMediaPhoto(
-            media=types.BufferedInputFile(png, filename="my_favorite_books.png"),
-            caption=f"⭐ Мои любимые книги · {len(favs)}"
-        )
+        png = await asyncio.to_thread(render_favorites_image, [{"title": row[4]} for row in favs])
+        media = types.InputMediaPhoto(media=types.BufferedInputFile(png, filename="my_favorite_books.png"),
+                                      caption=caption, parse_mode="HTML")
         await callback.message.edit_media(media=media, reply_markup=keyboard)
     except Exception as exc:
         logger.warning("Не удалось обновить карточку избранного: %s", exc)
-        try:
-            await callback.message.edit_caption(
-                caption=f"⭐ Мои любимые книги · {len(favs)}",
-                reply_markup=keyboard
-            )
-        except Exception:
-            try:                                   # карточка была обычным текстом, без картинки
-                await callback.message.edit_text(f"⭐ Мои любимые книги · {len(favs)}", reply_markup=keyboard)
-            except Exception:
-                pass
+        await _edit(callback.message, caption, keyboard)
 
-# CALLBACK — выбор языка
+
+# =========================
+# CALLBACK — выбор языка, подписка
 # =========================
 @dp.callback_query(lambda c: c.data and c.data.startswith("setlang_"))
 async def setlang_handler(callback: types.CallbackQuery):
     lang = callback.data.replace("setlang_", "")
+    if lang not in ("kz", "ru", "en"):                    # защита от подделанной кнопки
+        await callback.answer()
+        return
     save_lang(callback.from_user.id, lang)
-    name = callback.from_user.first_name
-    welcome = WELCOME_TEXTS.get(lang, WELCOME_TEXTS["kz"]).format(name=name)
-    await callback.message.delete()
-    await bot.send_photo(
-        chat_id=callback.message.chat.id,
-        photo=FSInputFile(os.path.join(BASE_DIR, "adasan.jpg")),
-        caption=welcome,
-        reply_markup=start_inline(lang)
-    )
-    await bot.send_message(chat_id=callback.message.chat.id, text="👇", reply_markup=main_menu_keyboard(lang))
-    await callback.answer()
+    await callback.answer(tl(lang, "lang_saved"))
+    await _safe_delete(callback.message)
+    await send_welcome(callback.message.chat.id, callback.from_user, with_keyboard=True)
+
 
 @dp.callback_query(lambda c: c.data == "check_sub")
 async def check_sub_handler(callback: types.CallbackQuery):
     if await check_subscription(callback.from_user.id, force=True):
-        await callback.message.delete()
-        await bot.send_photo(
-            chat_id=callback.message.chat.id,
-            photo=FSInputFile(os.path.join(BASE_DIR, "adasan.jpg")),
-            caption="🌐 Тілді таңдаңыз\nВыберите язык\nChoose language:",
-            reply_markup=lang_select_keyboard()
-        )
+        await callback.answer("✅")
+        await _safe_delete(callback.message)
+        await ask_language(callback.message.chat.id)
     else:
-        await callback.answer("❌ Сіз әлі жазылмадыңыз!", show_alert=True)
+        await callback.answer("❌ Сіз әлі жазылмадыңыз! / Вы ещё не подписались! / Not subscribed yet!",
+                              show_alert=True)
+
 
 # =========================
-# CALLBACK — Главное меню
+# CALLBACK — Главное меню и быстрые действия
 # =========================
 @dp.callback_query(lambda c: c.data == "go_main_menu")
 async def go_main_menu(callback: types.CallbackQuery):
-    lang = get_lang(callback.from_user.id)
-    welcome = WELCOME_TEXTS.get(lang, WELCOME_TEXTS["kz"]).format(name=callback.from_user.first_name)
-    await bot.send_photo(
-        chat_id=callback.message.chat.id,
-        photo=FSInputFile(os.path.join(BASE_DIR, "adasan.jpg")),
-        caption=welcome,
-        reply_markup=start_inline(lang)
-    )
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
     await callback.answer()
+    await send_welcome(callback.message.chat.id, callback.from_user)
+    await _safe_delete(callback.message)
 
-# Кнопки быстрых действий под приветствием
+
 @dp.callback_query(lambda c: c.data == "go_popular")
 async def go_popular(callback: types.CallbackQuery):
     await callback.answer()
     await send_popular(callback.message)
+
 
 @dp.callback_query(lambda c: c.data == "go_fav")
 async def go_fav(callback: types.CallbackQuery):
     await callback.answer()
     await send_favorites(callback.message, uid=callback.from_user.id)
 
+
 @dp.callback_query(lambda c: c.data == "go_lang")
 async def go_lang(callback: types.CallbackQuery):
     await callback.answer()
-    await callback.message.answer("🌐 Тілді таңдаңыз\nВыберите язык\nChoose language:", reply_markup=lang_select_keyboard())
+    await callback.message.answer(CHOOSE_LANG_TEXT, parse_mode="HTML", reply_markup=lang_select_keyboard())
+
 
 @dp.callback_query(lambda c: c.data == "open_subjects")
 async def open_subjects(callback: types.CallbackQuery):
-    await callback.message.edit_caption(
-        caption="📚 Пәнді таңдаңыз / Выберите предмет / Choose subject:",
-        reply_markup=start_inline()
-    )
+    """Старая кнопка из прежних версий меню — теперь просто открывает каталог."""
     await callback.answer()
+    await send_catalog(callback.message)
+
 
 # =========================
-# CALLBACK — предмет
+# CALLBACK — предмет и его разделы
 # =========================
 @dp.callback_query(lambda c: c.data and c.data.startswith("subject_"))
 async def back_to_subject(callback: types.CallbackQuery):
-    code = callback.data.replace("subject_", "")
-    await send_subject_menu(callback.message.chat.id, code)
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
+    code = callback.data.replace("subject_", "", 1)
+    await callback.answer()
+    await send_subject_menu(callback.message.chat.id, code, uid=callback.from_user.id)
+    await _safe_delete(callback.message)
+
+
+async def _coming_soon(callback, code, section_key):
+    lang = user_lang(callback.from_user.id)
+    text = tl(lang, "coming_soon", name=esc(subject_title(code, lang)), section=tl(lang, section_key))
+    if not await _edit(callback.message, text, coming_soon_inline(code, lang)):
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=coming_soon_inline(code, lang))
     await callback.answer()
 
-# =========================
-# CALLBACK — Книги
-# =========================
+
+async def _section_screen(callback, code, section_key, body, keyboard, photo=None):
+    """Экран раздела (силлабус, лекции, препараты, видео): фото предмета + описание + кнопки."""
+    lang = user_lang(callback.from_user.id)
+    caption = tl(lang, "section_card", section=tl(lang, section_key),
+                 name=esc(subject_title(code, lang)), body=body)
+    photo_path = os.path.join(BASE_DIR, photo or SUBJECT_PHOTOS.get(code, "adasan.jpg"))
+    if not os.path.exists(photo_path):
+        photo_path = LOGO
+    await bot.send_photo(chat_id=callback.message.chat.id, photo=FSInputFile(photo_path), caption=caption,
+                         parse_mode="HTML", reply_markup=keyboard)
+    await _safe_delete(callback.message)
+    await callback.answer()
+
+
+def _link_keyboard(lang, label, url, back_code):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=label, url=url)],
+        back_menu_row(lang, f"subject_{back_code}"),
+    ])
+
+
 @dp.callback_query(lambda c: c.data and c.data.startswith("books_"))
 async def books_handler(callback: types.CallbackQuery):
-    code = callback.data.replace("books_", "")
-    name = SUBJECT_NAMES.get(code, "📚 Другое")
+    code = callback.data.replace("books_", "", 1)
+    uid = callback.from_user.id
+    lang = user_lang(uid)
+    total = subject_book_count(code)
+    if total == 0:
+        await _coming_soon(callback, code, "btn_books")
+        return
+    caption = tl(lang, "books_choose_lang", name=esc(subject_title(code, lang)), n=total)
     photo_path = os.path.join(BASE_DIR, SUBJECT_PHOTOS.get(code, "adasan.jpg"))
-    langs = BOOKS_DB.get(code, {})
-    total = sum(len(v) for v in langs.values())
-
-    if total > 0:
-        caption = (
-            f"╔══════════════════════╗\n"
-            f"       📚 КІТАПТАР — {name}\n"
-            f"╚══════════════════════╝\n\n"
-            f"📖 Барлығы: {total} кітап\n\n"
-            f"👇 Тілді таңдаңыз / Выберите язык / Choose language:\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📌 @library_adasan"
-        )
-        await bot.send_photo(
-            chat_id=callback.message.chat.id,
-            photo=FSInputFile(photo_path),
-            caption=caption,
-            reply_markup=lang_inline(code, callback.from_user.id)
-        )
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
-    else:
-        try:
-            await callback.message.edit_caption(
-                caption=f"{name} — Книги\n\n⏳ Скоро будет доступно!",
-                reply_markup=coming_soon_inline(code)
-            )
-        except:
-            await callback.message.edit_text(
-                text=f"{name} — Книги\n\n⏳ Скоро будет доступно!",
-                reply_markup=coming_soon_inline(code)
-            )
+    if not os.path.exists(photo_path):
+        photo_path = LOGO
+    await bot.send_photo(chat_id=callback.message.chat.id, photo=FSInputFile(photo_path), caption=caption,
+                         parse_mode="HTML", reply_markup=lang_inline(code, uid))
+    await _safe_delete(callback.message)
     await callback.answer()
 
-# =========================
-# CALLBACK — Силлабус
-# =========================
+
+SILABUS_URLS = {
+    "gistologiya": "https://t.me/library_adasan/436",
+    "fiziologiya": "https://t.me/library_adasan/437",
+    "biofizika":   "https://t.me/library_adasan/437",
+    "biohimiya":   "https://t.me/library_adasan/437",
+    "anatomiya":   "https://t.me/library_adasan/437",
+    "genetika":    "https://t.me/library_adasan/437",
+}
+
+LECTURES = {   # предмет -> (текст описания, ссылка, фото)
+    "gistologiya": ("body_lecture_gist", "https://t.me/library_adasan/319", "gistologiya.jpg"),
+    "tarih":       ("body_lecture_tarih", "https://t.me/library_adasan/471", None),
+}
+
+PREPARATY = {
+    "gistologiya": ("body_preps", "https://t.me/library_adasan/268", "gistologiya.jpg"),
+}
+
+
 @dp.callback_query(lambda c: c.data and c.data.startswith("silabus_"))
 async def silabus_handler(callback: types.CallbackQuery):
-    code = callback.data.replace("silabus_", "")
-    name = SUBJECT_NAMES.get(code, "📚 Другое")
-    photo_path = os.path.join(BASE_DIR, SUBJECT_PHOTOS.get(code, "adasan.jpg"))
-    SILABUS_URLS = {
-        "gistologiya": "https://t.me/library_adasan/436",
-        "fiziologiya": "https://t.me/library_adasan/437",
-        "biofizika":   "https://t.me/library_adasan/437",
-        "biohimiya":   "https://t.me/library_adasan/437",
-        "anatomiya":   "https://t.me/library_adasan/437",
-        "genetika":    "https://t.me/library_adasan/437",
-    }
-    if code in SILABUS_URLS:
-        caption = (
-            f"╔══════════════════════╗\n"
-            f"      📋 СИЛЛАБУС — {name}\n"
-            f"╚══════════════════════╝\n\n"
-            f"📖 Пән: {name}\n"
-            f"🎯 Силлабуста не бар:\n"
-            f"    • Пәннің мақсаты мен міндеттері\n"
-            f"    • Тақырыптар тізімі\n"
-            f"    • Баға критерийлері\n"
-            f"    • Әдебиеттер тізімі\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📌 @library_adasan"
-        )
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📥 Силлабусты жүктеу / Скачать", url=SILABUS_URLS[code])],
-            [InlineKeyboardButton(text="⬅ Артқа / Назад / Back", callback_data=f"subject_{code}")],
-            [menu_button()],
-        ])
-        await bot.send_photo(chat_id=callback.message.chat.id,
-                             photo=FSInputFile(photo_path), caption=caption, reply_markup=keyboard)
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
-    else:
-        try:
-            await callback.message.edit_caption(
-                caption=f"{name} — Силлабус\n\n⏳ Скоро будет доступно!",
-                reply_markup=coming_soon_inline(code)
-            )
-        except:
-            await callback.message.edit_text(
-                f"{name} — Силлабус\n\n⏳ Скоро будет доступно!",
-                reply_markup=coming_soon_inline(code)
-            )
-    await callback.answer()
+    code = callback.data.replace("silabus_", "", 1)
+    if code not in SILABUS_URLS:
+        await _coming_soon(callback, code, "btn_syllabus")
+        return
+    lang = user_lang(callback.from_user.id)
+    await _section_screen(callback, code, "btn_syllabus", tl(lang, "body_syllabus"),
+                          _link_keyboard(lang, tl(lang, "btn_download"), SILABUS_URLS[code], code))
 
-# =========================
-# CALLBACK — Лекция
-# =========================
+
 @dp.callback_query(lambda c: c.data and c.data.startswith("lektsiya_"))
 async def lektsiya_handler(callback: types.CallbackQuery):
-    code = callback.data.replace("lektsiya_", "")
-    if code == "gistologiya":
-        photo_path = os.path.join(BASE_DIR, "gistologiya.jpg")
-        caption = (
-            "╔══════════════════════╗\n"
-            "       🎓 ЛЕКЦИЯ — ГИСТОЛОГИЯ\n"
-            "╚══════════════════════╝\n\n"
-            "📖 Пән: Гистология, Эмбриология, Цитология\n"
-            "🎯 Лекцияда не бар:\n"
-            "    • Толық лекция конспектілері\n"
-            "    • Схемалар мен кестелер\n"
-            "    • Сурет материалдары\n"
-            "    • Емтиханға дайындық\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "📌 @library_adasan"
-        )
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📥 Лекцияны жүктеу / Скачать", url="https://t.me/library_adasan/319")],
-            [InlineKeyboardButton(text="⬅ Артқа / Назад / Back", callback_data="subject_gistologiya")],
-            [menu_button()],
-        ])
-        await bot.send_photo(chat_id=callback.message.chat.id,
-                             photo=FSInputFile(photo_path), caption=caption, reply_markup=keyboard)
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
-    elif code == "tarih":
-        photo_path = os.path.join(BASE_DIR, SUBJECT_PHOTOS.get(code, "adasan.jpg"))
-        caption = (
-            "╔══════════════════════╗\n"
-            "       📖 ЛЕКЦИЯ — ТАРИХ\n"
-            "╚══════════════════════╝\n\n"
-            "📚 1-тақырыптан 15-тақырыпқа дейін\n"
-            "🎯 Барлық лекциялар қосылған\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "📌 @library_adasan"
-        )
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📖 Барлық лекциялар", url="https://t.me/library_adasan/471")],
-            [InlineKeyboardButton(text="⬅ Артқа / Назад / Back", callback_data="subject_tarih")],
-            [menu_button()],
-        ])
-        await bot.send_photo(chat_id=callback.message.chat.id,
-                             photo=FSInputFile(photo_path), caption=caption, reply_markup=keyboard)
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
-    else:
-        name = SUBJECT_NAMES.get(code, "📚 Другое")
-        try:
-            await callback.message.edit_caption(
-                caption=f"{name} — Лекция\n\n⏳ Скоро будет доступно!",
-                reply_markup=coming_soon_inline(code)
-            )
-        except:
-            await callback.message.edit_text(
-                f"{name} — Лекция\n\n⏳ Скоро будет доступно!",
-                reply_markup=coming_soon_inline(code)
-            )
-    await callback.answer()
+    code = callback.data.replace("lektsiya_", "", 1)
+    if code not in LECTURES:
+        await _coming_soon(callback, code, "btn_lecture")
+        return
+    lang = user_lang(callback.from_user.id)
+    body_key, url, photo = LECTURES[code]
+    await _section_screen(callback, code, "btn_lecture", tl(lang, body_key),
+                          _link_keyboard(lang, tl(lang, "btn_download"), url, code), photo=photo)
 
-# =========================
-# CALLBACK — Препараты
-# =========================
+
 @dp.callback_query(lambda c: c.data and c.data.startswith("preparaty_"))
 async def preparaty_handler(callback: types.CallbackQuery):
-    code = callback.data.replace("preparaty_", "")
-    if code == "gistologiya":
-        photo_path = os.path.join(BASE_DIR, "gistologiya.jpg")
-        caption = (
-            "╔══════════════════════╗\n"
-            "      🔬 ПРЕПАРАТЫ — ГИСТОЛОГИЯ\n"
-            "╚══════════════════════╝\n\n"
-            "📖 Пән: Гистология, Эмбриология, Цитология\n"
-            "🎯 Препараттарда не бар:\n"
-            "    • Микроскопиялық препараттар\n"
-            "    • Атлас суреттері\n"
-            "    • Препараттарды сипаттау\n"
-            "    • Практикалық сабаққа дайындық\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "📌 @library_adasan"
-        )
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📥 Препараттарды жүктеу / Скачать", url="https://t.me/library_adasan/268")],
-            [InlineKeyboardButton(text="⬅ Артқа / Назад / Back", callback_data="subject_gistologiya")],
-            [menu_button()],
-        ])
-        await bot.send_photo(chat_id=callback.message.chat.id,
-                             photo=FSInputFile(photo_path), caption=caption, reply_markup=keyboard)
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
-    else:
-        name = SUBJECT_NAMES.get(code, "📚 Другое")
-        try:
-            await callback.message.edit_caption(
-                caption=f"{name} — Препараты\n\n⏳ Скоро будет доступно!",
-                reply_markup=coming_soon_inline(code)
-            )
-        except:
-            await callback.message.edit_text(
-                f"{name} — Препараты\n\n⏳ Скоро будет доступно!",
-                reply_markup=coming_soon_inline(code)
-            )
-    await callback.answer()
+    code = callback.data.replace("preparaty_", "", 1)
+    if code not in PREPARATY:
+        await _coming_soon(callback, code, "btn_preps")
+        return
+    lang = user_lang(callback.from_user.id)
+    body_key, url, photo = PREPARATY[code]
+    await _section_screen(callback, code, "btn_preps", tl(lang, body_key),
+                          _link_keyboard(lang, tl(lang, "btn_download"), url, code), photo=photo)
+
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("video_"))
 async def video_handler(callback: types.CallbackQuery):
-    code = callback.data.replace("video_", "")
-    photo_path = os.path.join(BASE_DIR, SUBJECT_PHOTOS.get(code, "adasan.jpg"))
+    code = callback.data.replace("video_", "", 1)
+    lang = user_lang(callback.from_user.id)
     if code == "anatomiya":
-        caption = (
-            "╔══════════════════════╗\n"
-            "   🎬 БЕЙНЕСАБАҚ — АНАТОМИЯ\n"
-            "╚══════════════════════╝\n\n"
-            "📹 Тақырыптар:\n"
-            "    🦴 Остеология\n"
-            "    💀 Бас сүйек топографиясы\n"
-            "    💪 Миология\n"
-            "    🦵 Синдесмология\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "📌 @library_adasan"
-        )
-        keyboard = anat_video_inline()
+        await _section_screen(callback, code, "btn_video", tl(lang, "body_video_anat"), anat_video_inline(lang))
     elif code == "hirurgiya":
-        caption = (
-            "╔══════════════════════╗\n"
-            "   🎬 БЕЙНЕСАБАҚ — ХИРУРГИЯ\n"
-            "╚══════════════════════╝\n\n"
-            "📹 Хирургиялық техникалар\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "📌 @library_adasan"
-        )
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📌 Каналдан қарау", url="https://t.me/library_adasan")],
-            [InlineKeyboardButton(text="⬅ Артқа / Назад / Back", callback_data="subject_hirurgiya")],
-            [menu_button()],
-        ])
+        await _section_screen(callback, code, "btn_video", tl(lang, "body_video_surg"),
+                              _link_keyboard(lang, tl(lang, "btn_channel"), CHANNEL_URL, code))
     else:
-        await callback.answer("⏳ Скоро будет!")
+        await _coming_soon(callback, code, "btn_video")
+
+
+# =========================
+# CALLBACK — списки книг и карточка книги
+# =========================
+@dp.callback_query(lambda c: c.data and c.data.startswith(("bl_", "bp_")))
+async def booklist_handler(callback: types.CallbackQuery):
+    """bl_<предмет>_<язык> — первая страница, bp_<предмет>_<язык>_<страница> — листание.
+    Разбираем с конца (rsplit): так не ломается, даже если в коде раздела окажется «_»."""
+    uid = callback.from_user.id
+    try:
+        if callback.data.startswith("bl_"):
+            subject_code, lang = callback.data[3:].rsplit("_", 1)
+            page = 0
+        else:
+            subject_code, lang, page_raw = callback.data[3:].rsplit("_", 2)
+            page = int(page_raw)
+    except ValueError:
+        await callback.answer(tr(uid, "book_nf_alert"), show_alert=True)
         return
-    await bot.send_photo(chat_id=callback.message.chat.id,
-                         photo=FSInputFile(photo_path), caption=caption, reply_markup=keyboard)
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
+    text = booklist_header(uid, subject_code, lang, page)
+    keyboard = booklist_inline(subject_code, lang, page, uid)
+    if not await _edit(callback.message, text, keyboard):
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+        await _safe_delete(callback.message)
     await callback.answer()
 
-@dp.callback_query(lambda c: c.data and c.data.startswith("bl_"))
-async def booklang_handler(callback: types.CallbackQuery):
-    _, subject_code, lang = callback.data.split("_", 2)
-    count = len(_list_entries(subject_code, lang))     # тома одной книги считаются за одну
-    name = SUBJECT_NAMES.get(subject_code, "📚 Другое")
-    lang_name = {"rus": "🇷🇺 Русский", "kaz": "🇰🇿 Қазақша", "eng": "🇬🇧 English"}.get(lang, lang)
-    uid = callback.from_user.id
-    try:
-        await callback.message.edit_caption(
-            caption=tr(uid, "list_header", name=name, lang=lang_name, n=count),
-            reply_markup=booklist_inline(subject_code, lang, 0, uid)
-        )
-    except:
-        await callback.message.edit_text(
-            text=tr(uid, "list_header", name=name, lang=lang_name, n=count),
-            reply_markup=booklist_inline(subject_code, lang, 0, uid)
-        )
-    await callback.answer()
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("bp_"))
-async def bookpage_handler(callback: types.CallbackQuery):
-    parts = callback.data.split("_")
-    subject_code = parts[1]
-    lang = parts[2]
-    page = int(parts[3])
-    name = SUBJECT_NAMES.get(subject_code, "📚 Другое")
-    lang_name = {"rus": "🇷🇺 Русский", "kaz": "🇰🇿 Қазақша", "eng": "🇬🇧 English"}.get(lang, lang)
-    count = len(_list_entries(subject_code, lang))
-    uid = callback.from_user.id
-    try:
-        await callback.message.edit_caption(
-            caption=tr(uid, "list_header", name=name, lang=lang_name, n=count),
-            reply_markup=booklist_inline(subject_code, lang, page, uid)
-        )
-    except:
-        await callback.message.edit_text(
-            text=tr(uid, "list_header", name=name, lang=lang_name, n=count),
-            reply_markup=booklist_inline(subject_code, lang, page, uid)
-        )
-    await callback.answer()
 
 @dp.callback_query(lambda c: c.data and c.data.startswith(("bk_", "bm_")))
 async def bookopen_handler(callback: types.CallbackQuery):
     """bk_<предмет>_<язык>_<индекс> — из свежих списков; bm_<message_id> — из избранного и истории
     (не ломается после /update_books и /sort_other, когда индексы книг сдвигаются)."""
-    try:
-        parts = callback.data.split("_")
-        if parts[0] == "bm":
-            loc = _find_by_message_id(int(parts[1]))
-            if not loc:
-                raise KeyError("book moved")
-            subject_code, lang, idx = loc
-        else:
-            subject_code, lang, idx = parts[1], parts[2], int(parts[3])
-    except (ValueError, IndexError, KeyError):
-        await callback.answer(tr(callback.from_user.id, "book_nf_alert"), show_alert=True)
-        return
-    books_list = BOOKS_DB.get(subject_code, {}).get(lang, [])
-    if idx >= len(books_list):
-        await callback.answer(tr(callback.from_user.id, "book_nf_alert"), show_alert=True)
-        return
-    book = books_list[idx]
-    # Том многотомной книги: открываем всю серию одной карточкой (избранное, история, популярное)
-    series = series_info(book.get("message_id"))
-    if series:
-        await _send_series_card(callback, series)
-        return
-    name = book["file_name"].replace(".pdf","").replace(".djvu","").replace("_"," ")
-    lang_name = {"rus": "🇷🇺 Русский", "kaz": "🇰🇿 Қазақша", "eng": "🇬🇧 English"}.get(lang, lang)
-    subject_name = SUBJECT_NAMES.get(subject_code, "📚 Другое")
-    caption = (
-        f"╔══════════════════════╗\n"
-        f"  📖 {name[:40]}\n"
-        f"╚══════════════════════╝\n\n"
-        f"📚 {tr(callback.from_user.id, 'card_subject')} {subject_name}\n"
-        f"🌐 {tr(callback.from_user.id, 'card_lang')} {lang_name}\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📌 @library_adasan"
-    )
-    keyboard = book_card_keyboard(subject_code, lang, idx, book["url"], callback.from_user.id)
-    sent = False
-    cover_id = book.get("photo_message_id")
-    source_chat = f"@{CHANNEL.lstrip('@')}"
-    if cover_id:
-        # Сначала копируем обложку с карточкой. Если Telegram не разрешит копирование,
-        # пробуем переслать исходное фото отдельным сообщением.
+    uid = callback.from_user.id
+    loc = None
+    if callback.data.startswith("bm_"):
+        mid = _int(callback.data[3:])
+        loc = _find_by_message_id(mid) if mid else None
+    else:
         try:
-            await bot.copy_message(
-                chat_id=callback.message.chat.id,
-                from_chat_id=source_chat,
-                message_id=int(cover_id),
-                caption=caption,
-                reply_markup=keyboard,
-            )
-            sent = True
-        except Exception as e:
-            logger.warning(f"Обложка не скопировалась (пост {cover_id}): {e}")
-            try:
-                await bot.forward_message(
-                    chat_id=callback.message.chat.id,
-                    from_chat_id=source_chat,
-                    message_id=int(cover_id),
-                )
-                await bot.send_message(
-                    chat_id=callback.message.chat.id,
-                    text=caption,
-                    reply_markup=keyboard,
-                )
-                sent = True
-            except Exception as forward_error:
-                logger.warning(f"Обложка не переслалась (пост {cover_id}): {forward_error}")
-    if not sent:
-        # Не показываем тематическую иллюстрацию как будто это обложка книги.
-        # Если настоящий снимок недоступен, отправляем исходный пост с книгой.
-        try:
-            await bot.copy_message(
-                chat_id=callback.message.chat.id,
-                from_chat_id=source_chat,
-                message_id=int(book["message_id"]),
-                caption=caption,
-                reply_markup=keyboard,
-            )
-            sent = True
-        except Exception as e:
-            logger.warning(f"Пост книги не скопировался ({book.get('message_id')}): {e}")
-    if not sent:
-        await bot.send_message(
-            chat_id=callback.message.chat.id,
-            text=caption,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📥 Жүктеу / Скачать", url=book["url"])],
-                [InlineKeyboardButton(text="⬅ Артқа / Назад / Back", callback_data=f"bl_{subject_code}_{lang}")],
-            ]),
-        )
-    # Сохраняем в историю
-    book_name_short = name[:50]
-    add_book_history(callback.from_user.id, subject_code, lang, idx, book_name_short, book["url"])
-    record_book_open(book["url"], book_name_short, subject_code, lang)
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
+            sc, lg, idx = callback.data[3:].rsplit("_", 2)
+            loc = (sc, lg, int(idx))
+        except ValueError:
+            loc = None
+    if not loc or not await send_book_card(callback.message.chat.id, uid, *loc):
+        await callback.answer(tr(uid, "book_nf_alert"), show_alert=True)
+        return
+    await _safe_delete(callback.message)
     await callback.answer()
 
-# =========================
-# CALLBACK — Избранное
-# =========================
+
 @dp.callback_query(lambda c: c.data and c.data.startswith("fav_add_"))
 async def fav_add_handler(callback: types.CallbackQuery):
+    uid = callback.from_user.id
     try:
-        subject_code, lang, idx_raw = callback.data.replace("fav_add_", "").split("_")
-        idx = int(idx_raw)
-    except ValueError:
-        await callback.answer(tr(callback.from_user.id, "book_nf_alert"), show_alert=True)
+        subject_code, lang, idx_raw = callback.data.replace("fav_add_", "", 1).rsplit("_", 2)
+        book = BOOKS_DB.get(subject_code, {}).get(lang, [])[int(idx_raw)]
+    except (ValueError, IndexError):
+        await callback.answer(tr(uid, "book_nf_alert"), show_alert=True)
         return
-    db_books = BOOKS_DB.get(subject_code, {}).get(lang, [])
-    if idx >= len(db_books):
-        await callback.answer(tr(callback.from_user.id, "book_nf_alert"), show_alert=True)
-        return
-    book = db_books[idx]
-    book_name = book["file_name"].replace(".pdf","").replace(".djvu","").replace("_"," ")[:50]
-    book_url = book["url"]
-    added = add_favorite(callback.from_user.id, subject_code, lang, idx, book_name, book_url)
-    if added:
-        await callback.answer(tr(callback.from_user.id, "fav_added"), show_alert=True)
-    else:
-        await callback.answer(tr(callback.from_user.id, "fav_exists"), show_alert=True)
+    book_name = _plain_name(book.get("file_name", ""))[:50]
+    added = add_favorite(uid, subject_code, lang, int(idx_raw), book_name, book["url"])
+    await callback.answer(tr(uid, "fav_added" if added else "fav_exists"), show_alert=True)
+
 
 # =========================
-# КНОПКИ НИЖНЕЙ КЛАВИАТУРЫ
+# ИСТОРИЯ
 # =========================
-@dp.message(is_button("history"))
-async def history_button(message: types.Message):
-    history = get_book_history(message.from_user.id, limit=10)
+def _history_screen(uid):
+    lang = user_lang(uid)
+    history = get_book_history(uid, limit=10)
     if not history:
-        await message.answer(
-            "📖 История пуста\n\nАшқан кітаптарыңыз осында көрінеді.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [menu_button()]
-            ])
-        )
-        return
+        return tl(lang, "history_empty"), InlineKeyboardMarkup(inline_keyboard=[[menu_button(lang)]])
     rows = []
     for sc, lg, bi, bn, bu, opened_at in history:
-        date_str = opened_at[:10] if opened_at else ""
-        flag = {"rus": "🇷🇺", "kaz": "🇰🇿", "eng": "🇬🇧"}.get(lg, "📖")
-        rows.append([InlineKeyboardButton(
-            text=f"{flag} {bn[:28]} ({date_str})",
-            callback_data=f"bm_{_mid_from_url(bu)}"
-        )])
-    rows.append([menu_button()])
-    await message.answer(
-        f"📖 Соңғы {len(history)} кітап / Последние {len(history)} книг:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
-    )
+        date_str = f"{opened_at[8:10]}.{opened_at[5:7]}" if opened_at and len(opened_at) >= 10 else ""
+        flag = LANG_FLAGS.get(lg, "📖")
+        rows.append([InlineKeyboardButton(text=f"{flag} {bn[:30]}  · {date_str}".rstrip(" ·"),
+                                          callback_data=f"bm_{_mid_from_url(bu)}")])
+    rows.append([InlineKeyboardButton(text=tl(lang, "btn_clear_history"), callback_data="hist_clear"),
+                 menu_button(lang)])
+    return tl(lang, "history_title", n=len(history)), InlineKeyboardMarkup(inline_keyboard=rows)
 
+
+@dp.message(Command("history"))
+@dp.message(is_button("history"))
+async def history_command(message: types.Message):
+    text, keyboard = _history_screen(message.from_user.id)
+    await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+
+
+@dp.callback_query(lambda c: c.data == "hist_clear")
+async def history_clear(callback: types.CallbackQuery):
+    uid = callback.from_user.id
+    clear_book_history(uid)
+    await callback.answer(tr(uid, "history_cleared"))
+    text, keyboard = _history_screen(uid)
+    await _edit(callback.message, text, keyboard)
+
+
+# =========================
+# КНОПКИ ПРЕДМЕТОВ НИЖНЕЙ КЛАВИАТУРЫ
+# =========================
 @dp.message(lambda m: m.text and m.text.lower() in SUBJECTS)
 async def open_subject(message: types.Message):
-    code = SUBJECTS[message.text.lower()]
-    await send_subject_menu(message.chat.id, code)
+    await send_subject_menu(message.chat.id, SUBJECTS[message.text.lower()], uid=message.from_user.id)
+
 
 @dp.message(is_button("legacy_subjects"))
 async def all_subjects_button(message: types.Message):
     """Кнопку «Все предметы» убрали из клавиатуры, но у части пользователей она ещё висит:
     показываем каталог и сразу подсовываем обновлённую клавиатуру."""
     await send_catalog(message)
-    await message.answer(
-        "🔄 Мәзір жаңартылды / Меню обновлено 👇",
-        reply_markup=main_menu_keyboard(get_lang(message.from_user.id))
-    )
-
-@dp.message(Command("history"))
-async def history_command(message: types.Message):
-    history = get_book_history(message.from_user.id, limit=10)
-    if not history:
-        await message.answer(
-            "📖 История пуста\n\nАшқан кітаптарыңыз осында көрінеді.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [menu_button()]
-            ])
-        )
-        return
-    rows = []
-    for sc, lg, bi, bn, bu, opened_at in history:
-        date_str = opened_at[:10] if opened_at else ""
-        flag = {"rus": "🇷🇺", "kaz": "🇰🇿", "eng": "🇬🇧"}.get(lg, "📖")
-        rows.append([InlineKeyboardButton(
-            text=f"{flag} {bn[:28]} ({date_str})",
-            callback_data=f"bm_{_mid_from_url(bu)}"
-        )])
-    rows.append([menu_button()])
-    await message.answer(
-        f"📖 Соңғы {len(history)} кітап / Последние {len(history)} книг:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
-    )
+    lang = get_lang(message.from_user.id)
+    await message.answer(tl(user_lang(message.from_user.id), "keyboard_ready"), reply_markup=main_menu_keyboard(lang))
